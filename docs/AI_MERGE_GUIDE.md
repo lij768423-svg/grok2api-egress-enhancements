@@ -19,8 +19,10 @@
 6. 代理池单次连接失败不得修改节点级健康、失败次数或冷却。
 7. 健康探针只能清理 last_error 精确等于 transport error 的冷却，不得清理 anti-bot 或管理员状态。
 8. 质量守护 API 必须保持管理员鉴权，响应和日志不得包含管理员密码、Client Key 密钥、代理 URL、Prompt 或模型响应正文。
-9. 不得读取或修改真实 .env、config.yaml、数据库、状态卷或生产代理配置。
-10. 完成后运行 Go 全量测试、sidecar 单测、前端 lint/build，并列出所有语义冲突和处理方式。
+9. 主动和被动质量速度必须保持 grok2api 面板口径：outputTokens / (durationMs - firstTokenMs)，不得减去 reasoningTokens。
+10. 被动软/硬 TPS 只能触发固定 Prompt 主动复测，不得直接隔离；只有主动 hard 或连续主动 soft 才允许隔离，被动触发的复测错误也不得直接隔离。
+11. 不得读取或修改真实 .env、config.yaml、数据库、状态卷或生产代理配置。
+12. 完成后运行 Go 全量测试、sidecar 单测、前端 lint/build，并列出所有语义冲突和处理方式。
 ```
 
 ## 手工起点

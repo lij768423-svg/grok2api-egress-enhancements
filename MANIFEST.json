@@ -3,9 +3,9 @@
   "upstream_repository": "https://github.com/chenyme/grok2api",
   "upstream_tag": "v3.0.11",
   "upstream_commit": "090104504b403d65675a01dab9c92b3a235ee832",
-  "patch_commit": "137589c33ce5106317b496dc699dac6b6b4c98cc",
+  "patch_commit": "690a641deb06c5c1a73983677f6b454557727113",
   "patch_file": "patches/0001-feat-add-egress-recovery-and-quality-guard.patch",
-  "patch_sha256": "49b8efc7dde992eeb2595161383c9484e9fd38d06eb2af85d1cf30498abef6e4",
+  "patch_sha256": "ef5e6538f2419dcb85d926dbf5b2cdd1ee726b3549a0d095a4a5d47eb26a6f51",
   "upstream_pr": "https://github.com/chenyme/grok2api/pull/837",
   "runnable_fork_branch": "https://github.com/lij768423-svg/grok2api/tree/agent/egress-resilience-quality-guard"
 }

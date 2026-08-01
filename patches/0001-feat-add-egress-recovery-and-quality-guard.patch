@@ -1,4 +1,4 @@
-From 137589c33ce5106317b496dc699dac6b6b4c98cc Mon Sep 17 00:00:00 2001
+From 690a641deb06c5c1a73983677f6b454557727113 Mon Sep 17 00:00:00 2001
 From: lij768423-svg <265844445+lij768423-svg@users.noreply.github.com>
 Date: Sat, 1 Aug 2026 02:24:59 +0000
 Subject: [PATCH] feat: add egress recovery and quality guard
@@ -12,39 +12,41 @@ Subject: [PATCH] feat: add egress recovery and quality guard
  .../internal/application/clientkey/service.go |  10 +
  .../application/egress/quality_probe_test.go  |  73 ++
  .../internal/application/egress/service.go    | 103 +-
- .../application/gateway/quality_probe.go      | 185 ++++
+ .../application/gateway/quality_probe.go      | 191 ++++
+ .../application/gateway/quality_probe_test.go |  19 +
  .../internal/application/gateway/selector.go  |  18 +-
  .../application/gateway/selector_test.go      |  46 +
  .../internal/application/gateway/service.go   |   5 +
  backend/internal/domain/egress/egress.go      |   2 +
  .../internal/infra/egress/FAILURE_RETRY.md    |  44 +
  backend/internal/infra/egress/manager.go      | 157 ++-
- backend/internal/infra/egress/manager_test.go | 268 ++++++
+ backend/internal/infra/egress/manager_test.go | 268 +++++
  backend/internal/infra/egress/trace.go        |  19 +
  .../relational/egress_operations_test.go      |  20 +
  .../relational/egress_repository.go           |  31 +-
- .../internal/transport/http/egress/handler.go | 366 ++++++-
+ .../internal/transport/http/egress/handler.go | 368 ++++++-
  .../transport/http/egress/handler_test.go     |  82 ++
  backend/internal/transport/http/server.go     |  34 +-
  frontend/src/app/app-shell.tsx                |   3 +-
  frontend/src/app/deferred-pages.tsx           |   5 +
  frontend/src/app/router.tsx                   |   3 +-
- .../quality-guard/quality-guard-api.ts        | 151 +++
+ .../quality-guard/quality-guard-api.ts        | 152 +++
  .../quality-guard/quality-guard-page.tsx      | 324 +++++++
  .../src/features/settings/egress-nodes.tsx    |   2 +
  frontend/src/shared/i18n/index.ts             |  17 +-
  tools/egress-quality-guard/Dockerfile         |  13 +
- tools/egress-quality-guard/README.md          | 202 ++++
- tools/egress-quality-guard/README.zh-CN.md    | 136 +++
+ tools/egress-quality-guard/README.md          | 206 ++++
+ tools/egress-quality-guard/README.zh-CN.md    | 138 +++
  tools/egress-quality-guard/SECURITY.md        |  22 +
  .../compose.override.example.yml              |  25 +
  .../egress-quality-guard.env.example          |  33 +
  .../grok2api-egress-quality-guard.service     |  27 +
- tools/egress-quality-guard/quality_guard.py   | 904 ++++++++++++++++++
- .../quality_guard_test.py                     | 239 +++++
- 38 files changed, 3528 insertions(+), 63 deletions(-)
+ tools/egress-quality-guard/quality_guard.py   | 918 ++++++++++++++++++
+ .../quality_guard_test.py                     | 309 ++++++
+ 39 files changed, 3646 insertions(+), 63 deletions(-)
  create mode 100644 backend/internal/application/egress/quality_probe_test.go
  create mode 100644 backend/internal/application/gateway/quality_probe.go
+ create mode 100644 backend/internal/application/gateway/quality_probe_test.go
  create mode 100644 backend/internal/infra/egress/FAILURE_RETRY.md
  create mode 100644 frontend/src/features/quality-guard/quality-guard-api.ts
  create mode 100644 frontend/src/features/quality-guard/quality-guard-page.tsx
@@ -272,7 +274,7 @@ index 0000000..af09b4a
 +	}
 +}
 diff --git a/backend/internal/application/egress/service.go b/backend/internal/application/egress/service.go
-index 8badd49..877d0a1 100644
+index 8badd49..1f8f023 100644
 --- a/backend/internal/application/egress/service.go
 +++ b/backend/internal/application/egress/service.go
 @@ -16,14 +16,54 @@ import (
@@ -312,21 +314,21 @@ index 8badd49..877d0a1 100644
 +}
 +
 +type QualityProbeResult struct {
-+	RequestID              string
-+	NodeID                 uint64
-+	Model                  string
-+	StatusCode             int
-+	FirstTokenMS           int64
-+	DurationMS             int64
-+	GenerationMS           int64
-+	ChunkCount             int
-+	OutputTokens           int64
-+	ReasoningTokens        int64
-+	VisibleTokens          int64
-+	VisibleCharacters      int
-+	VisibleTokensPerSecond float64
-+	ExpectedMatched        bool
-+	ResponseSHA256         string
++	RequestID             string
++	NodeID                uint64
++	Model                 string
++	StatusCode            int
++	FirstTokenMS          int64
++	DurationMS            int64
++	GenerationMS          int64
++	ChunkCount            int
++	OutputTokens          int64
++	ReasoningTokens       int64
++	VisibleTokens         int64
++	VisibleCharacters     int
++	OutputTokensPerSecond float64
++	ExpectedMatched       bool
++	ResponseSHA256        string
 +}
 +
 +type QualityProber interface {
@@ -401,10 +403,10 @@ index 8badd49..877d0a1 100644
  type AccountBindingRepository interface {
 diff --git a/backend/internal/application/gateway/quality_probe.go b/backend/internal/application/gateway/quality_probe.go
 new file mode 100644
-index 0000000..a405011
+index 0000000..3f20505
 --- /dev/null
 +++ b/backend/internal/application/gateway/quality_probe.go
-@@ -0,0 +1,185 @@
+@@ -0,0 +1,191 @@
 +package gateway
 +
 +import (
@@ -495,7 +497,6 @@ index 0000000..a405011
 +	}
 +
 +	var firstGeneratedAt time.Time
-+	var firstVisibleAt time.Time
 +	var visible strings.Builder
 +	chunkCount := 0
 +	totalBytes := 0
@@ -542,9 +543,6 @@ index 0000000..a405011
 +				}
 +			}
 +			if delta.Content != "" {
-+				if firstVisibleAt.IsZero() {
-+					firstVisibleAt = time.Now()
-+				}
 +				visible.WriteString(delta.Content)
 +				chunkCount++
 +			}
@@ -562,6 +560,7 @@ index 0000000..a405011
 +	completedAt := time.Now()
 +	text := visible.String()
 +	visibleCharacters := utf8.RuneCountInString(text)
++	// Visible tokens are diagnostic only; TPS intentionally uses total output tokens to match the audit panel.
 +	visibleTokens := usage.OutputTokens - usage.ReasoningTokens
 +	if visibleTokens <= 0 && visibleCharacters > 0 {
 +		visibleTokens = int64((visibleCharacters + 3) / 4)
@@ -570,25 +569,59 @@ index 0000000..a405011
 +	if !firstGeneratedAt.IsZero() {
 +		firstTokenMS = firstGeneratedAt.Sub(startedAt).Milliseconds()
 +	}
++	durationMS := completedAt.Sub(startedAt).Milliseconds()
 +	var generationMS int64
-+	if !firstVisibleAt.IsZero() {
-+		generationMS = completedAt.Sub(firstVisibleAt).Milliseconds()
++	if !firstGeneratedAt.IsZero() {
++		generationMS = durationMS - firstTokenMS
 +		if generationMS < 1 {
 +			generationMS = 1
 +		}
 +	}
-+	var visibleTokensPerSecond float64
-+	if visibleTokens > 0 && generationMS > 0 {
-+		visibleTokensPerSecond = float64(visibleTokens) * 1000 / float64(generationMS)
++	var outputTokensPerSecond float64
++	if !firstGeneratedAt.IsZero() {
++		outputTokensPerSecond = qualityProbeOutputTokensPerSecond(usage.OutputTokens, durationMS, firstTokenMS)
 +	}
 +	digest := sha256.Sum256([]byte(text))
 +	return egressapp.QualityProbeResult{
 +		RequestID: requestID, NodeID: nodeID, Model: input.Model, StatusCode: result.StatusCode,
-+		FirstTokenMS: firstTokenMS, DurationMS: completedAt.Sub(startedAt).Milliseconds(), GenerationMS: generationMS,
++		FirstTokenMS: firstTokenMS, DurationMS: durationMS, GenerationMS: generationMS,
 +		ChunkCount: chunkCount, OutputTokens: usage.OutputTokens, ReasoningTokens: usage.ReasoningTokens,
-+		VisibleTokens: visibleTokens, VisibleCharacters: visibleCharacters, VisibleTokensPerSecond: visibleTokensPerSecond,
++		VisibleTokens: visibleTokens, VisibleCharacters: visibleCharacters, OutputTokensPerSecond: outputTokensPerSecond,
 +		ExpectedMatched: strings.Contains(text, input.Expected), ResponseSHA256: hex.EncodeToString(digest[:]),
 +	}, nil
++}
++
++func qualityProbeOutputTokensPerSecond(outputTokens, durationMS, firstTokenMS int64) float64 {
++	generationMS := durationMS - firstTokenMS
++	if outputTokens <= 0 || generationMS <= 0 {
++		return 0
++	}
++	return float64(outputTokens) * 1000 / float64(generationMS)
++}
+diff --git a/backend/internal/application/gateway/quality_probe_test.go b/backend/internal/application/gateway/quality_probe_test.go
+new file mode 100644
+index 0000000..bcd79d8
+--- /dev/null
++++ b/backend/internal/application/gateway/quality_probe_test.go
+@@ -0,0 +1,19 @@
++package gateway
++
++import "testing"
++
++func TestQualityProbeOutputTokensPerSecondMatchesAuditPanel(t *testing.T) {
++	got := qualityProbeOutputTokensPerSecond(1335, 17320, 17100)
++	want := float64(1335) * 1000 / 220
++	if got != want {
++		t.Fatalf("output TPS = %v, want %v", got, want)
++	}
++}
++
++func TestQualityProbeOutputTokensPerSecondIncludesReasoningTokens(t *testing.T) {
++	// The panel reports completion/output tokens, including reasoning tokens.
++	got := qualityProbeOutputTokensPerSecond(1050, 1100, 1000)
++	if got != 10500 {
++		t.Fatalf("output TPS = %v, want 10500", got)
++	}
 +}
 diff --git a/backend/internal/application/gateway/selector.go b/backend/internal/application/gateway/selector.go
 index 143ddd5..1a6ca7b 100644
@@ -1419,7 +1452,7 @@ index b0da95d..e182d17 100644
  		return mapError(result.Error)
  	}
 diff --git a/backend/internal/transport/http/egress/handler.go b/backend/internal/transport/http/egress/handler.go
-index 1e5b2b8..133b39c 100644
+index 1e5b2b8..8e6e7a8 100644
 --- a/backend/internal/transport/http/egress/handler.go
 +++ b/backend/internal/transport/http/egress/handler.go
 @@ -1,9 +1,14 @@
@@ -1474,7 +1507,7 @@ index 1e5b2b8..133b39c 100644
  	router.POST("/egress-nodes/:id/accounts", h.assignAccounts)
  	router.DELETE("/egress-nodes/accounts", h.unassignAccounts)
  	router.PUT("/egress-nodes/:id", h.update)
-@@ -45,6 +68,301 @@ func (h *Handler) Register(router *gin.RouterGroup) {
+@@ -45,6 +68,302 @@ func (h *Handler) Register(router *gin.RouterGroup) {
  	router.POST("/egress-operations/rebalance", h.rebalance)
  }
  
@@ -1500,12 +1533,12 @@ index 1e5b2b8..133b39c 100644
 +}
 +
 +type qualityGuardDetectionStats struct {
-+	Total         uint64 `json:"total"`
-+	Healthy       uint64 `json:"healthy"`
-+	Soft          uint64 `json:"soft"`
-+	Hard          uint64 `json:"hard"`
-+	Errors        uint64 `json:"errors"`
-+	VisibleTokens uint64 `json:"visible_tokens"`
++	Total        uint64 `json:"total"`
++	Healthy      uint64 `json:"healthy"`
++	Soft         uint64 `json:"soft"`
++	Hard         uint64 `json:"hard"`
++	Errors       uint64 `json:"errors"`
++	OutputTokens uint64 `json:"output_tokens"`
 +}
 +
 +type qualityGuardActionStats struct {
@@ -1543,8 +1576,8 @@ index 1e5b2b8..133b39c 100644
 +	LastObservedAt     float64 `json:"last_observed_at"`
 +	LastSource         string  `json:"last_source"`
 +	LastClassification string  `json:"last_classification"`
-+	LastVisibleTPS     float64 `json:"last_visible_tps"`
-+	LastVisibleTokens  int     `json:"last_visible_tokens"`
++	LastOutputTPS      float64 `json:"last_output_tps"`
++	LastOutputTokens   int     `json:"last_output_tokens"`
 +	LastFirstTokenMS   int     `json:"last_first_token_ms"`
 +	LastDurationMS     int     `json:"last_duration_ms"`
 +}
@@ -1556,7 +1589,7 @@ index 1e5b2b8..133b39c 100644
 +	NodeName       string  `json:"node_name"`
 +	Reason         string  `json:"reason"`
 +	Classification string  `json:"classification"`
-+	VisibleTPS     float64 `json:"visible_tps"`
++	OutputTPS      float64 `json:"output_tps"`
 +}
 +
 +func (h *Handler) qualityGuardStatus(c *gin.Context) {
@@ -1768,7 +1801,8 @@ index 1e5b2b8..133b39c 100644
 +		"generationMs": value.GenerationMS, "chunkCount": value.ChunkCount,
 +		"outputTokens": value.OutputTokens, "reasoningTokens": value.ReasoningTokens,
 +		"visibleTokens": value.VisibleTokens, "visibleCharacters": value.VisibleCharacters,
-+		"visibleTokensPerSecond": value.VisibleTokensPerSecond, "expectedMatched": value.ExpectedMatched,
++		"outputTokensPerSecond":  value.OutputTokensPerSecond,
++		"visibleTokensPerSecond": value.OutputTokensPerSecond, "expectedMatched": value.ExpectedMatched,
 +		"responseSha256": value.ResponseSHA256,
 +	})
 +}
@@ -1776,7 +1810,7 @@ index 1e5b2b8..133b39c 100644
  func (h *Handler) cleanupPreview(c *gin.Context) {
  	value, err := h.service.PreviewUnhealthyCleanup(c.Request.Context())
  	if err != nil {
-@@ -140,6 +458,48 @@ type batchNodeUpdateRequest struct {
+@@ -140,6 +459,49 @@ type batchNodeUpdateRequest struct {
  	Enabled *bool    `json:"enabled" binding:"required"`
  }
  
@@ -1817,7 +1851,8 @@ index 1e5b2b8..133b39c 100644
 +		"generationMs": value.GenerationMS, "chunkCount": value.ChunkCount,
 +		"outputTokens": value.OutputTokens, "reasoningTokens": value.ReasoningTokens,
 +		"visibleTokens": value.VisibleTokens, "visibleCharacters": value.VisibleCharacters,
-+		"visibleTokensPerSecond": value.VisibleTokensPerSecond, "expectedMatched": value.ExpectedMatched,
++		"outputTokensPerSecond":  value.OutputTokensPerSecond,
++		"visibleTokensPerSecond": value.OutputTokensPerSecond, "expectedMatched": value.ExpectedMatched,
 +		"responseSha256": value.ResponseSHA256,
 +	})
 +}
@@ -1825,7 +1860,7 @@ index 1e5b2b8..133b39c 100644
  func (h *Handler) updateMany(c *gin.Context) {
  	var request batchNodeUpdateRequest
  	if c.ShouldBindJSON(&request) != nil {
-@@ -725,6 +1085,8 @@ func (h *Handler) writeError(c *gin.Context, err error) {
+@@ -725,6 +1087,8 @@ func (h *Handler) writeError(c *gin.Context, err error) {
  		response.Error(c, http.StatusBadGateway, "egressSubscriptionSyncFailed", "代理订阅同步失败")
  	case errors.Is(err, egressapp.ErrClearanceUnavailable):
  		response.Error(c, http.StatusConflict, "clearanceRefreshUnavailable", err.Error())
@@ -1835,7 +1870,7 @@ index 1e5b2b8..133b39c 100644
  		response.Error(c, http.StatusBadGateway, "clearanceRefreshFailed", err.Error())
  	default:
 diff --git a/backend/internal/transport/http/egress/handler_test.go b/backend/internal/transport/http/egress/handler_test.go
-index 83ff3fa..f085289 100644
+index 83ff3fa..07389b6 100644
 --- a/backend/internal/transport/http/egress/handler_test.go
 +++ b/backend/internal/transport/http/egress/handler_test.go
 @@ -4,6 +4,7 @@ import (
@@ -1852,7 +1887,7 @@ index 83ff3fa..f085289 100644
  
 +func TestQualityGuardStatusReadsOnlyPublicState(t *testing.T) {
 +	path := t.TempDir() + "/state.json"
-+	state := `{"version":1,"started_at":10,"updated_at":20,"last_active_cycle_at":15,"last_passive_poll_at":19,"password":"must-not-leak","guard":{"mode":"hybrid","model":"grok-4.5","client_key_id":"6","node_ids":["8"],"active_interval_seconds":1800,"passive_poll_seconds":5,"soft_tps":500,"hard_tps":1000,"consecutive_soft":2,"consecutive_errors":2,"quarantine_seconds":300,"min_healthy_nodes":3,"max_output_tokens":384,"prompt":"private-probe-prompt","expected":"private-marker"},"nodes":{"8":{"active_soft_strikes":0,"passive_soft_strikes":0,"error_strikes":0,"quarantined_until":0,"disabled_by_guard":false,"last_reason":"","last_probe_at":15,"last_observed_at":19,"last_source":"passive","last_classification":"healthy","last_visible_tps":42.5,"last_visible_tokens":100,"last_first_token_ms":900,"last_duration_ms":4000}},"statistics":{"started_at":11,"active":{"total":7,"healthy":6,"soft":1,"hard":0,"errors":0,"visible_tokens":1400},"passive":{"total":9,"healthy":8,"soft":0,"hard":1,"errors":0,"visible_tokens":1800},"actions":{"quarantined":1,"restored":0,"suppressed":0}}}`
++	state := `{"version":1,"started_at":10,"updated_at":20,"last_active_cycle_at":15,"last_passive_poll_at":19,"password":"must-not-leak","guard":{"mode":"hybrid","model":"grok-4.5","client_key_id":"6","node_ids":["8"],"active_interval_seconds":1800,"passive_poll_seconds":5,"soft_tps":500,"hard_tps":1000,"consecutive_soft":2,"consecutive_errors":2,"quarantine_seconds":300,"min_healthy_nodes":3,"max_output_tokens":384,"prompt":"private-probe-prompt","expected":"private-marker"},"nodes":{"8":{"active_soft_strikes":0,"passive_soft_strikes":0,"error_strikes":0,"quarantined_until":0,"disabled_by_guard":false,"last_reason":"","last_probe_at":15,"last_observed_at":19,"last_source":"passive","last_classification":"healthy","last_output_tps":42.5,"last_output_tokens":100,"last_first_token_ms":900,"last_duration_ms":4000}},"statistics":{"started_at":11,"active":{"total":7,"healthy":6,"soft":1,"hard":0,"errors":0,"output_tokens":1400},"passive":{"total":9,"healthy":8,"soft":0,"hard":1,"errors":0,"output_tokens":1800},"actions":{"quarantined":1,"restored":0,"suppressed":0}}}`
 +	if err := os.WriteFile(path, []byte(state), 0o600); err != nil {
 +		t.Fatal(err)
 +	}
@@ -1860,7 +1895,7 @@ index 83ff3fa..f085289 100644
 +	context, _ := gin.CreateTestContext(recorder)
 +	context.Request = httptest.NewRequest("GET", "/egress-quality-guard", nil)
 +	NewHandler(nil, path).qualityGuardStatus(context)
-+	if recorder.Code != 200 || !strings.Contains(recorder.Body.String(), `"available":true`) || !strings.Contains(recorder.Body.String(), `"last_visible_tps":42.5`) || !strings.Contains(recorder.Body.String(), `"visible_tokens":1400`) {
++	if recorder.Code != 200 || !strings.Contains(recorder.Body.String(), `"available":true`) || !strings.Contains(recorder.Body.String(), `"last_output_tps":42.5`) || !strings.Contains(recorder.Body.String(), `"output_tokens":1400`) {
 +		t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
 +	}
 +	if strings.Contains(recorder.Body.String(), "must-not-leak") || strings.Contains(recorder.Body.String(), "private-probe-prompt") || strings.Contains(recorder.Body.String(), "private-marker") || !strings.Contains(recorder.Body.String(), `"recentEvents":[]`) {
@@ -2051,10 +2086,10 @@ index dc50cd4..43a211c 100644
            { path: "/settings", element: <DeferredSettingsPage /> },
 diff --git a/frontend/src/features/quality-guard/quality-guard-api.ts b/frontend/src/features/quality-guard/quality-guard-api.ts
 new file mode 100644
-index 0000000..8390694
+index 0000000..a3d7273
 --- /dev/null
 +++ b/frontend/src/features/quality-guard/quality-guard-api.ts
-@@ -0,0 +1,151 @@
+@@ -0,0 +1,152 @@
 +import { apiRequest } from "@/shared/api/client";
 +import { createObjectDecoder, hasShape, isArrayOf, isBoolean, isNumber, isOneOf, isOptional, isRecordOf, isString } from "@/shared/api/decoder";
 +
@@ -2081,8 +2116,8 @@ index 0000000..8390694
 +  last_observed_at: number;
 +  last_source: string;
 +  last_classification: string;
-+  last_visible_tps: number;
-+  last_visible_tokens: number;
++  last_output_tps: number;
++  last_output_tokens: number;
 +  last_first_token_ms: number;
 +  last_duration_ms: number;
 +};
@@ -2094,7 +2129,7 @@ index 0000000..8390694
 +  node_name: string;
 +  reason: string;
 +  classification: string;
-+  visible_tps: number;
++  output_tps: number;
 +};
 +
 +export type QualityGuardDetectionStats = {
@@ -2103,7 +2138,7 @@ index 0000000..8390694
 +  soft: number;
 +  hard: number;
 +  errors: number;
-+  visible_tokens: number;
++  output_tokens: number;
 +};
 +
 +export type QualityGuardStatistics = {
@@ -2145,8 +2180,9 @@ index 0000000..8390694
 +  statusCode: number;
 +  firstTokenMs: number;
 +  durationMs: number;
++  outputTokens: number;
 +  visibleTokens: number;
-+  visibleTokensPerSecond: number;
++  outputTokensPerSecond: number;
 +  expectedMatched: boolean;
 +};
 +
@@ -2154,12 +2190,12 @@ index 0000000..8390694
 +  active_soft_strikes: isNumber, passive_soft_strikes: isNumber, error_strikes: isNumber,
 +  quarantined_until: isNumber, disabled_by_guard: isBoolean, last_reason: isString,
 +  last_probe_at: isNumber, last_observed_at: isNumber, last_source: isString,
-+  last_classification: isString, last_visible_tps: isNumber, last_visible_tokens: isNumber,
++  last_classification: isString, last_output_tps: isNumber, last_output_tokens: isNumber,
 +  last_first_token_ms: isNumber, last_duration_ms: isNumber,
 +});
 +const eventValidator = hasShape({
 +  ts: isNumber, event: isString, node_id: isString, node_name: isString,
-+  reason: isString, classification: isString, visible_tps: isNumber,
++  reason: isString, classification: isString, output_tps: isNumber,
 +});
 +const configValidator = hasShape({
 +  mode: isOneOf("active", "passive", "hybrid"), model: isString, client_key_id: isString,
@@ -2169,7 +2205,7 @@ index 0000000..8390694
 +});
 +const detectionStatsValidator = hasShape({
 +  total: isNumber, healthy: isNumber, soft: isNumber, hard: isNumber,
-+  errors: isNumber, visible_tokens: isNumber,
++  errors: isNumber, output_tokens: isNumber,
 +});
 +const statisticsValidator = hasShape({
 +  started_at: isNumber,
@@ -2191,7 +2227,7 @@ index 0000000..8390694
 +
 +const decodeQualityTest = createObjectDecoder<QualityTestResult>("quality test", {
 +  nodeId: isString, statusCode: isNumber, firstTokenMs: isNumber, durationMs: isNumber,
-+  visibleTokens: isNumber, visibleTokensPerSecond: isNumber, expectedMatched: isBoolean,
++  outputTokens: isNumber, visibleTokens: isNumber, outputTokensPerSecond: isNumber, expectedMatched: isBoolean,
 +});
 +
 +export function getQualityGuardStatus(): Promise<QualityGuardStatus> {
@@ -2208,7 +2244,7 @@ index 0000000..8390694
 +}
 diff --git a/frontend/src/features/quality-guard/quality-guard-page.tsx b/frontend/src/features/quality-guard/quality-guard-page.tsx
 new file mode 100644
-index 0000000..9f271eb
+index 0000000..b404e72
 --- /dev/null
 +++ b/frontend/src/features/quality-guard/quality-guard-page.tsx
 @@ -0,0 +1,324 @@
@@ -2251,7 +2287,7 @@ index 0000000..9f271eb
 +    mutationFn: ({ nodeId, status }: { nodeId: string; status: QualityGuardStatus }) => runQualityTest(nodeId, status),
 +    onSuccess: (result, variables) => {
 +      setManualResults((current) => ({ ...current, [variables.nodeId]: qualityTestState(result, variables.status) }));
-+      toast.success(t("qualityGuard.testComplete", { speed: formatTPS(result.visibleTokensPerSecond) }));
++      toast.success(t("qualityGuard.testComplete", { speed: formatTPS(result.outputTokensPerSecond) }));
 +    },
 +    onError: (error) => toast.error(error instanceof Error ? error.message : t("errors.generic")),
 +  });
@@ -2303,7 +2339,7 @@ index 0000000..9f271eb
 +              <Table className="min-w-[900px]">
 +                <TableHeader><TableRow>
 +                  <TableHead>{t("qualityGuard.node")}</TableHead><TableHead>{t("qualityGuard.state")}</TableHead>
-+                  <TableHead className="text-right">{t("qualityGuard.visibleTPS")}</TableHead><TableHead className="text-right">{t("qualityGuard.firstToken")}</TableHead>
++                  <TableHead className="text-right">{t("qualityGuard.outputTPS")}</TableHead><TableHead className="text-right">{t("qualityGuard.firstToken")}</TableHead>
 +                  <TableHead>{t("qualityGuard.source")}</TableHead><TableHead>{t("qualityGuard.strikes")}</TableHead>
 +                  <TableHead>{t("qualityGuard.lastObserved")}</TableHead><TableHead className="w-28 text-right">{t("common.actions")}</TableHead>
 +                </TableRow></TableHeader>
@@ -2333,7 +2369,7 @@ index 0000000..9f271eb
 +    { icon: BarChart3, label: t("qualityGuard.statisticsChecks"), value: formatCount(checks, locale), detail: t("qualityGuard.statisticsChecksHelp") },
 +    { icon: Bot, label: t("qualityGuard.statisticsActive"), value: formatCount(statistics.active.total, locale), detail: t("qualityGuard.statisticsActiveDetail", { healthy: formatCount(statistics.active.healthy, locale), errors: formatCount(statistics.active.errors, locale) }) },
 +    { icon: Eye, label: t("qualityGuard.statisticsPassive"), value: formatCount(statistics.passive.total, locale), detail: t("qualityGuard.statisticsPassiveDetail", { healthy: formatCount(statistics.passive.healthy, locale) }) },
-+    { icon: Coins, label: t("qualityGuard.statisticsTokens"), value: formatCount(statistics.active.visible_tokens, locale), detail: t("qualityGuard.statisticsTokensHelp") },
++    { icon: Coins, label: t("qualityGuard.statisticsTokens"), value: formatCount(statistics.active.output_tokens, locale), detail: t("qualityGuard.statisticsTokensHelp") },
 +    { icon: AlertTriangle, label: t("qualityGuard.statisticsAnomalies"), value: formatCount(anomalies, locale), detail: t("qualityGuard.statisticsAnomalyDetail", { soft: formatCount(statistics.active.soft + statistics.passive.soft, locale), hard: formatCount(statistics.active.hard + statistics.passive.hard, locale) }) },
 +    { icon: Shield, label: t("qualityGuard.statisticsQuarantines"), value: formatCount(statistics.actions.quarantined, locale), detail: t("qualityGuard.statisticsActionDetail", { restored: formatCount(statistics.actions.restored, locale), suppressed: formatCount(statistics.actions.suppressed, locale) }) },
 +  ];
@@ -2365,7 +2401,7 @@ index 0000000..9f271eb
 +  return <TableRow>
 +    <TableCell><div className="font-medium">{node.name}</div><div className="mt-0.5 text-[11px] text-muted-foreground">ID {node.id}</div></TableCell>
 +    <TableCell><StateBadge node={node} state={state} /></TableCell>
-+    <TableCell className={cn("text-right font-mono text-xs tabular-nums", classification === "hard" && "font-medium text-destructive", classification === "soft" && "text-amber-600 dark:text-amber-400")}>{state?.last_observed_at ? formatTPS(state.last_visible_tps) : "-"}</TableCell>
++    <TableCell className={cn("text-right font-mono text-xs tabular-nums", classification === "hard" && "font-medium text-destructive", classification === "soft" && "text-amber-600 dark:text-amber-400")}>{state?.last_observed_at ? formatTPS(state.last_output_tps) : "-"}</TableCell>
 +    <TableCell className="text-right font-mono text-xs tabular-nums">{state?.last_first_token_ms ? `${state.last_first_token_ms} ms` : "-"}</TableCell>
 +    <TableCell className="text-xs text-muted-foreground">{state?.last_source ? t(`qualityGuard.sources.${state.last_source}`) : "-"}</TableCell>
 +    <TableCell className="text-xs tabular-nums">{state ? `${state.passive_soft_strikes} / ${state.active_soft_strikes} / ${state.error_strikes}` : "-"}</TableCell>
@@ -2390,7 +2426,7 @@ index 0000000..9f271eb
 +    <h2 id="guard-events-title" className="text-sm font-medium">{t("qualityGuard.events")}</h2>
 +    {events.length === 0 ? <p className="mt-8 text-center text-xs text-muted-foreground">{t("qualityGuard.noEvents")}</p> : <div className="mt-3 space-y-1">
 +      {[...events].reverse().slice(0, 10).map((event, index) => <div key={`${event.ts}-${index}`} className="grid grid-cols-[minmax(0,1fr)_auto] gap-4 rounded-md px-2 py-2 hover:bg-secondary/40">
-+        <div className="min-w-0"><p className="truncate text-xs font-medium">{event.node_name || `ID ${event.node_id}`} · {t(`qualityGuard.eventTypes.${event.event}`)}</p><p className="mt-1 truncate text-[11px] text-muted-foreground">{t(`qualityGuard.reasons.${event.reason || "unknown"}`)}{event.visible_tps ? ` · ${formatTPS(event.visible_tps)}` : ""}</p></div>
++        <div className="min-w-0"><p className="truncate text-xs font-medium">{event.node_name || `ID ${event.node_id}`} · {t(`qualityGuard.eventTypes.${event.event}`)}</p><p className="mt-1 truncate text-[11px] text-muted-foreground">{t(`qualityGuard.reasons.${event.reason || "unknown"}`)}{event.output_tps ? ` · ${formatTPS(event.output_tps)}` : ""}</p></div>
 +        <time className="text-[11px] text-muted-foreground">{formatTime(event.ts, locale)}</time>
 +      </div>)}
 +    </div>}
@@ -2520,16 +2556,16 @@ index 0000000..9f271eb
 +  let classification = "healthy";
 +  let reason = "within_threshold";
 +  if (!result.expectedMatched) { classification = "soft"; reason = "expected_marker_missing"; }
-+  else if (result.visibleTokens < 32) { classification = "soft"; reason = "insufficient_visible_tokens"; }
-+  else if (result.visibleTokensPerSecond >= hardTPS) { classification = "hard"; reason = "hard_tps"; }
-+  else if (result.visibleTokensPerSecond >= softTPS) { classification = "soft"; reason = "soft_tps"; }
++  else if (result.outputTokens < 32) { classification = "soft"; reason = "insufficient_output_tokens"; }
++  else if (result.outputTokensPerSecond >= hardTPS) { classification = "hard"; reason = "hard_tps"; }
++  else if (result.outputTokensPerSecond >= softTPS) { classification = "soft"; reason = "soft_tps"; }
 +  const now = Date.now() / 1000;
 +  return {
 +    active_soft_strikes: classification === "soft" ? 1 : classification === "hard" ? (status.config?.consecutive_soft ?? 2) : 0,
 +    passive_soft_strikes: 0, error_strikes: 0, quarantined_until: 0, disabled_by_guard: false,
 +    last_reason: reason, last_probe_at: now, last_observed_at: now, last_source: "active",
-+    last_classification: classification, last_visible_tps: result.visibleTokensPerSecond,
-+    last_visible_tokens: result.visibleTokens, last_first_token_ms: result.firstTokenMs, last_duration_ms: result.durationMs,
++    last_classification: classification, last_output_tps: result.outputTokensPerSecond,
++    last_output_tokens: result.outputTokens, last_first_token_ms: result.firstTokenMs, last_duration_ms: result.durationMs,
 +  };
 +}
 +function formatTPS(value: number): string { return `${new Intl.NumberFormat(undefined, { maximumFractionDigits: 1 }).format(value)} Token/s`; }
@@ -2550,7 +2586,7 @@ index b11a54f..447a5f6 100644
    const save = useMutation({
      mutationFn: () => {
 diff --git a/frontend/src/shared/i18n/index.ts b/frontend/src/shared/i18n/index.ts
-index 7caddbb..0b51247 100644
+index 7caddbb..1b4a157 100644
 --- a/frontend/src/shared/i18n/index.ts
 +++ b/frontend/src/shared/i18n/index.ts
 @@ -175,6 +175,7 @@ const resources = {
@@ -2569,12 +2605,12 @@ index 7caddbb..0b51247 100644
 +        title: "质量守护", description: "监测 Grok 出口质量并在异常时自动隔离节点。", overview: "质量守护概览",
 +        serviceStatus: "守护服务", running: "运行正常", stale: "状态滞后", mode: "检测模式", availableNodes: "已启用节点", quarantinedNodes: "已隔离节点",
 +        modes: { active: "主动检测", passive: "被动审计", hybrid: "混合模式" },
-+        nodes: "节点质量", nodesHelp: "速度只统计可见输出 Token，不包含推理 Token。打击计数依次为被动 / 主动 / 错误。", updatedAt: "状态更新于 {{time}}",
-+        node: "节点", state: "状态", visibleTPS: "可见速度", firstToken: "首字延迟", source: "数据来源", strikes: "打击计数", lastObserved: "最近观测", test: "检测",
++        nodes: "节点质量", nodesHelp: "速度与 grok2api 面板同口径：输出 Token 包含推理 Token。被动异常只触发主动复测。打击计数依次为被动 / 主动 / 错误。", updatedAt: "状态更新于 {{time}}",
++        node: "节点", state: "状态", outputTPS: "面板输出速度", firstToken: "首字延迟", source: "数据来源", strikes: "打击计数", lastObserved: "最近观测", test: "检测",
 +        sources: { active: "主动探针", passive: "请求审计" }, quarantined: "已隔离", suspect: "可疑", healthy: "正常", pending: "待观测", probeFailed: "检测失败",
 +        events: "最近事件", noEvents: "暂无异常或恢复事件", eventTypes: { node_quarantined: "节点已隔离", node_restored: "节点已恢复", passive_audit_anomaly: "检测到异常请求" },
-+        statistics: "自动检测统计", statisticsSince: "自 {{time}} 开始累计，不含手动检测。", statisticsChecks: "有效检测总数", statisticsChecksHelp: "主动探测与有效被动审计", statisticsActive: "主动探测", statisticsActiveDetail: "正常 {{healthy}}，错误 {{errors}}", statisticsPassive: "被动审计", statisticsPassiveDetail: "正常 {{healthy}}，来自真实请求", statisticsTokens: "主动探测可见 Token", statisticsTokensHelp: "仅模型可见输出，不代表代理流量", statisticsAnomalies: "异常命中", statisticsAnomalyDetail: "软异常 {{soft}}，硬异常 {{hard}}", statisticsQuarantines: "执行隔离", statisticsActionDetail: "已恢复 {{restored}}，受保护未隔离 {{suppressed}}",
-+        reasons: { unknown: "未记录原因", hard_tps: "超过硬阈值", soft_tps: "超过软阈值", passive_hard_tps: "请求速度超过硬阈值", passive_soft_tps: "请求速度连续超过软阈值", quality_probe_healthy: "模型质量检测恢复正常", expected_marker_missing: "响应标记缺失", insufficient_visible_tokens: "可见 Token 不足", probe_errors: "主动检测连续失败" },
++        statistics: "自动检测统计", statisticsSince: "自 {{time}} 开始累计，不含手动检测。", statisticsChecks: "有效检测总数", statisticsChecksHelp: "主动探测与有效被动审计", statisticsActive: "主动探测", statisticsActiveDetail: "正常 {{healthy}}，错误 {{errors}}", statisticsPassive: "被动审计", statisticsPassiveDetail: "正常 {{healthy}}，来自真实请求", statisticsTokens: "主动探测输出 Token", statisticsTokensHelp: "包含推理 Token，不代表代理流量", statisticsAnomalies: "异常命中", statisticsAnomalyDetail: "软异常 {{soft}}，硬异常 {{hard}}", statisticsQuarantines: "执行隔离", statisticsActionDetail: "已恢复 {{restored}}，受保护未隔离 {{suppressed}}",
++        reasons: { unknown: "未记录原因", hard_tps: "超过硬阈值", soft_tps: "超过软阈值", passive_hard_tps: "请求速度超过硬阈值", passive_soft_tps: "请求速度连续超过软阈值", quality_probe_healthy: "模型质量检测恢复正常", expected_marker_missing: "响应标记缺失", insufficient_output_tokens: "输出 Token 不足", insufficient_visible_tokens: "可见 Token 不足", probe_errors: "主动检测连续失败" },
 +        policy: "当前策略", editPolicy: "编辑策略", editPolicyTitle: "编辑质量守护策略", editPolicyDescription: "保存后由守护进程热加载，无需重启服务。", restoreDefaults: "恢复默认值", policySaved: "策略已保存，正在热加载", invalidPolicyValue: "数值超出允许范围", softThresholdMustBeLower: "软阈值必须低于硬阈值", activeIntervalSeconds: "主动检测间隔（秒）", passiveIntervalSeconds: "被动审计间隔（秒）", consecutiveSoft: "软阈值连续次数", consecutiveErrors: "检测错误连续次数", quarantineSeconds: "隔离时长（秒）", softThreshold: "软阈值", hardThreshold: "硬阈值", activeInterval: "主动间隔", passiveInterval: "审计间隔", quarantineDuration: "隔离时长", minimumNodes: "最少保留节点",
 +        unavailable: "质量守护尚未连接", unavailableHelp: "为主服务挂载 guard 状态卷，并设置 QUALITY_GUARD_STATE_FILE 后，这里会显示实时状态。", testComplete: "检测完成：{{speed}}",
 +      },
@@ -2594,7 +2630,7 @@ index 7caddbb..0b51247 100644
        media: { images: { title: "Gallery", description: "Browse generated image assets", search: "Search ID, type, or hash", empty: "No images", noMatches: "No matching images", totalImages: "Total images", totalBytes: "Storage", pageSummary: "Showing {{count}} / {{total}}", openImage: "Open image {{id}}", deleteTitle: "Delete {{count}} selected images?", deleteDescription: "The image files and gallery records will be permanently removed, and existing image links will stop working. This cannot be undone.", deleted: "Deleted {{count}} images" }, videos: { title: "Video Gallery", description: "View video generation job records", search: "Search prompt or ID", empty: "No video jobs", statusFilter: "Status filter", totalJobs: "Total jobs", queued: "Queued", inProgress: "In progress", completed: "Completed", failed: "Failed", prompt: "Prompt", model: "Model", status: "Status", progress: "Progress", statusProgress: "Status / progress", spec: "Spec", owner: "Owner", createdAt: "Created", completedAt: "Completed", time: "Time", createdShort: "Created", completedShort: "Done", preview: "Preview video", previewTitle: "Video preview", previewUnavailable: "Local video unavailable", deleteTitle: "Delete {{count}} video records?", deleteDescription: "The task records and their local videos will be permanently removed, and existing video links will stop working. This cannot be undone.", deleted: "Deleted {{count}} video records", seconds: "{{count}} sec", pageSummary: "Showing {{count}} / {{total}}" }, videoStatus: { queued: "Queued", in_progress: "In progress", completed: "Completed", failed: "Failed" } },
        auth: { title: "Admin sign in", productTitle: "Lightweight API gateway", subtitle: "Manage upstream accounts, model routes, and client access.", username: "Username", password: "Password", usernameRequired: "Enter your username", passwordRequired: "Enter your password", signIn: "Sign in", signingIn: "Signing in", signOut: "Sign out", changePassword: "Change password", currentPassword: "Current password", newPassword: "New password", passwordUpdated: "Password updated. Sign in again.", sessionUnavailable: "Unable to restore the session", sessionUnavailableDescription: "The service may be temporarily unavailable. Your session was not cleared; please retry shortly.", retrySession: "Retry" },
        shell: { appearance: "Appearance", dark: "Dark", light: "Light", system: "System", language: "Language", navigation: "Navigation", openNavigation: "Open navigation" },
-+      qualityGuard: { title: "Quality guard", description: "Monitor Grok egress quality and quarantine anomalous nodes automatically.", overview: "Quality guard overview", serviceStatus: "Guard service", running: "Running", stale: "Status stale", mode: "Detection mode", availableNodes: "Enabled nodes", quarantinedNodes: "Quarantined", modes: { active: "Active probes", passive: "Passive audits", hybrid: "Hybrid" }, nodes: "Node quality", nodesHelp: "Speed counts visible output tokens only. Strike counts are passive / active / errors.", updatedAt: "Updated {{time}}", node: "Node", state: "State", visibleTPS: "Visible speed", firstToken: "First token", source: "Source", strikes: "Strikes", lastObserved: "Last observed", test: "Test", sources: { active: "Active probe", passive: "Request audit" }, quarantined: "Quarantined", suspect: "Suspect", healthy: "Healthy", pending: "Pending", probeFailed: "Probe failed", events: "Recent events", noEvents: "No anomaly or recovery events", eventTypes: { node_quarantined: "Node quarantined", node_restored: "Node restored", passive_audit_anomaly: "Anomalous request detected" }, statistics: "Automatic detection statistics", statisticsSince: "Accumulated since {{time}}. Manual tests are excluded.", statisticsChecks: "Valid checks", statisticsChecksHelp: "Active probes and valid passive audits", statisticsActive: "Active probes", statisticsActiveDetail: "Healthy {{healthy}}, errors {{errors}}", statisticsPassive: "Passive audits", statisticsPassiveDetail: "Healthy {{healthy}}, from real requests", statisticsTokens: "Active visible tokens", statisticsTokensHelp: "Visible model output only, not proxy traffic", statisticsAnomalies: "Anomaly hits", statisticsAnomalyDetail: "Soft {{soft}}, hard {{hard}}", statisticsQuarantines: "Quarantines applied", statisticsActionDetail: "Restored {{restored}}, protected {{suppressed}}", reasons: { unknown: "No reason recorded", hard_tps: "Hard threshold exceeded", soft_tps: "Soft threshold exceeded", passive_hard_tps: "Request exceeded hard threshold", passive_soft_tps: "Requests repeatedly exceeded soft threshold", quality_probe_healthy: "Model quality probe recovered", expected_marker_missing: "Expected marker missing", insufficient_visible_tokens: "Too few visible tokens", probe_errors: "Repeated probe errors" }, policy: "Current policy", editPolicy: "Edit policy", editPolicyTitle: "Edit quality guard policy", editPolicyDescription: "The guard hot-reloads saved changes without a service restart.", restoreDefaults: "Restore defaults", policySaved: "Policy saved and queued for hot reload", invalidPolicyValue: "Value is outside the allowed range", softThresholdMustBeLower: "The soft threshold must be lower than the hard threshold", activeIntervalSeconds: "Active interval (seconds)", passiveIntervalSeconds: "Passive interval (seconds)", consecutiveSoft: "Consecutive soft strikes", consecutiveErrors: "Consecutive probe errors", quarantineSeconds: "Quarantine (seconds)", softThreshold: "Soft threshold", hardThreshold: "Hard threshold", activeInterval: "Active interval", passiveInterval: "Audit interval", quarantineDuration: "Quarantine", minimumNodes: "Minimum nodes", unavailable: "Quality guard is not connected", unavailableHelp: "Mount the guard state volume into the main service and set QUALITY_GUARD_STATE_FILE to display live status here.", testComplete: "Test complete: {{speed}}" },
++      qualityGuard: { title: "Quality guard", description: "Monitor Grok egress quality and quarantine anomalous nodes automatically.", overview: "Quality guard overview", serviceStatus: "Guard service", running: "Running", stale: "Status stale", mode: "Detection mode", availableNodes: "Enabled nodes", quarantinedNodes: "Quarantined", modes: { active: "Active probes", passive: "Passive audits", hybrid: "Hybrid" }, nodes: "Node quality", nodesHelp: "Speed matches the grok2api panel: output tokens include reasoning tokens. Passive anomalies only trigger an active confirmation. Strike counts are passive / active / errors.", updatedAt: "Updated {{time}}", node: "Node", state: "State", outputTPS: "Panel output speed", firstToken: "First token", source: "Source", strikes: "Strikes", lastObserved: "Last observed", test: "Test", sources: { active: "Active probe", passive: "Request audit" }, quarantined: "Quarantined", suspect: "Suspect", healthy: "Healthy", pending: "Pending", probeFailed: "Probe failed", events: "Recent events", noEvents: "No anomaly or recovery events", eventTypes: { node_quarantined: "Node quarantined", node_restored: "Node restored", passive_audit_anomaly: "Anomalous request detected" }, statistics: "Automatic detection statistics", statisticsSince: "Accumulated since {{time}}. Manual tests are excluded.", statisticsChecks: "Valid checks", statisticsChecksHelp: "Active probes and valid passive audits", statisticsActive: "Active probes", statisticsActiveDetail: "Healthy {{healthy}}, errors {{errors}}", statisticsPassive: "Passive audits", statisticsPassiveDetail: "Healthy {{healthy}}, from real requests", statisticsTokens: "Active output tokens", statisticsTokensHelp: "Includes reasoning tokens; not proxy traffic", statisticsAnomalies: "Anomaly hits", statisticsAnomalyDetail: "Soft {{soft}}, hard {{hard}}", statisticsQuarantines: "Quarantines applied", statisticsActionDetail: "Restored {{restored}}, protected {{suppressed}}", reasons: { unknown: "No reason recorded", hard_tps: "Hard threshold exceeded", soft_tps: "Soft threshold exceeded", passive_hard_tps: "Request exceeded hard threshold", passive_soft_tps: "Requests repeatedly exceeded soft threshold", quality_probe_healthy: "Model quality probe recovered", expected_marker_missing: "Expected marker missing", insufficient_output_tokens: "Too few output tokens", insufficient_visible_tokens: "Too few visible tokens", probe_errors: "Repeated probe errors" }, policy: "Current policy", editPolicy: "Edit policy", editPolicyTitle: "Edit quality guard policy", editPolicyDescription: "The guard hot-reloads saved changes without a service restart.", restoreDefaults: "Restore defaults", policySaved: "Policy saved and queued for hot reload", invalidPolicyValue: "Value is outside the allowed range", softThresholdMustBeLower: "The soft threshold must be lower than the hard threshold", activeIntervalSeconds: "Active interval (seconds)", passiveIntervalSeconds: "Passive interval (seconds)", consecutiveSoft: "Consecutive soft strikes", consecutiveErrors: "Consecutive probe errors", quarantineSeconds: "Quarantine (seconds)", softThreshold: "Soft threshold", hardThreshold: "Hard threshold", activeInterval: "Active interval", passiveInterval: "Audit interval", quarantineDuration: "Quarantine", minimumNodes: "Minimum nodes", unavailable: "Quality guard is not connected", unavailableHelp: "Mount the guard state volume into the main service and set QUALITY_GUARD_STATE_FILE to display live status here.", testComplete: "Test complete: {{speed}}" },
        accountQuotaReset: { action: "Reset quota", description: "This clears only local waiting-reset and model quota blocks. It does not change upstream Billing or audit history. Accounts that remain exhausted will be marked again by real traffic.", completed: "Reset local quota state for {{reset}} accounts" },
        accountQuotaTask: { title: "Process quota for {{count}} selected accounts", description: "Choose the quota task to run for the selected Grok Build accounts.", allTitle: "Process quota for all accounts", allDescription: "Choose the quota task to run for all enabled Grok Build accounts.", syncDescription: "Request upstream Billing and update local quota snapshots, account tiers, and recovery state.", resetAllDescription: "Clear local waiting-reset and exhausted-quota blocks for all enabled Grok Build accounts without changing upstream Billing or audit history.", execute: "Run task" },
        accountExport: { countDescription: "Exports accounts in stable order, up to 10,000 per batch.", batchProgress: "Exported {{count}} accounts; the next download is batch {{batch}}.", nextBatch: "Export next batch", batchCompleted: "Exported {{count}} accounts in this batch", completed: "Export complete: {{count}} accounts" },
@@ -2619,15 +2655,15 @@ index 0000000..53b30ec
 +ENTRYPOINT ["/usr/local/bin/grok2api-egress-quality-guard"]
 diff --git a/tools/egress-quality-guard/README.md b/tools/egress-quality-guard/README.md
 new file mode 100644
-index 0000000..2fe4e32
+index 0000000..cf58b5e
 --- /dev/null
 +++ b/tools/egress-quality-guard/README.md
-@@ -0,0 +1,202 @@
+@@ -0,0 +1,206 @@
 +# Egress Quality Guard
 +
 +Egress Quality Guard combines passive production-audit monitoring with active
-+Grok Build probes through each fixed egress node. It can quarantine anomalously
-+fast or malformed routes and restore them only after a clean recovery probe.
++Grok Build probes through each fixed egress node. Passive anomalies are candidate
++signals; only a fixed active probe can confirm them and quarantine a node.
 +
 +This is a heuristic circuit breaker, not a model-quality oracle. Very high
 +reported throughput can be caused by upstream or intermediary buffering. Start
@@ -2643,16 +2679,18 @@ index 0000000..2fe4e32
 +
 +## How it works
 +
-+1. Passive mode polls recent successful streaming audits and recomputes visible
-+   throughput as `(output - reasoning) / (duration - first token)`.
++1. Passive mode polls recent successful streaming audits and computes the same
++   speed shown by the grok2api panel: `output / (duration - first token)`.
++   `output` intentionally includes reasoning tokens.
 +2. Active mode calls the administrator-only
 +   `POST /api/admin/v1/egress-nodes/{id}/quality-test` endpoint.
 +3. grok2api selects only an account explicitly bound to that node and sends a
 +   fixed streaming prompt.
-+4. The probe measures visible output tokens, chunk cadence, first-token time,
-+   instruction-marker compliance, and visible-token throughput.
-+5. A hard threshold quarantines immediately. A soft threshold or probe error
-+   requires consecutive observations.
++4. The fixed probe checks output tokens, chunk cadence, first-token time,
++   instruction-marker compliance, and panel-equivalent output-token throughput.
++5. A high-TPS production request only triggers an immediate fixed-prompt probe;
++   it never quarantines a node by itself. An active hard result quarantines
++   immediately, while active soft results must reach the configured strike count.
 +6. Quarantined nodes remain available only to administrator probes. Recovery
 +   records a generic connectivity probe for diagnosis, then uses the real
 +   model-quality probe as the authority before re-enabling the node.
@@ -2664,13 +2702,14 @@ index 0000000..2fe4e32
 +
 +`QUALITY_GUARD_MODE` accepts:
 +
-+- `passive`: inspect ordinary request audits every few seconds. This adds no
-+  model requests; recovery probes still run for nodes quarantined by the guard.
++- `passive`: inspect ordinary request audits every few seconds. Routine polling
++  adds no model requests, but a candidate anomaly triggers one active confirmation
++  probe. Recovery probes still run for nodes quarantined by the guard.
 +- `active`: run only fixed per-node probes at the configured interval.
 +- `hybrid`: enable both detectors. This is the recommended default.
 +
 +Passive monitoring ignores non-streaming requests, failed requests, responses
-+with fewer than 32 visible tokens, and audits created by the guard's own client
++with fewer than 32 output tokens, and audits created by the guard's own client
 +key. On first startup it records a baseline without replaying historical
 +anomalies. Cursor pagination and a persistent bounded ID set prevent duplicate
 +processing across polls and restarts.
@@ -2681,9 +2720,9 @@ index 0000000..2fe4e32
 +
 +## Admin UI
 +
-+The admin sidebar includes a Quality guard page showing service freshness, mode, per-node visible Token/s, time to first token, strike counts, quarantine state, and recent events. Operators can also run one real model quality test against a selected node.
++The admin sidebar includes a Quality guard page showing service freshness, mode, per-node panel-equivalent output Token/s, time to first token, strike counts, quarantine state, and recent events. Operators can also run one real model quality test against a selected node.
 +
-+The page also reports cumulative automatic checks, active probes, passive audits, anomaly hits, quarantine and recovery actions, and visible output tokens produced by active probes since statistics were enabled. Manual tests are excluded. Actual proxy transfer bytes cannot be recovered reliably from HTTPS/SSE request audits, so Token counts are not presented as network traffic.
++The page also reports cumulative automatic checks, active probes, passive audits, anomaly hits, quarantine and recovery actions, and output tokens produced by active probes since statistics were enabled. Those output counts include reasoning tokens. Manual tests are excluded. Actual proxy transfer bytes cannot be recovered reliably from HTTPS/SSE request audits, so Token counts are not presented as network traffic.
 +
 +The main service exposes only sanitized state and writes editable policy fields only to a separate runtime config file. In Docker, mount the same state volume into the main service and set:
 +
@@ -2773,9 +2812,10 @@ index 0000000..2fe4e32
 +
 +## Known limitations
 +
-+- HTTPS/SSE audits cannot provide reliable proxy transfer-byte counts. The UI reports active-probe visible output Tokens and does not label them as network traffic.
++- HTTPS/SSE audits cannot provide reliable proxy transfer-byte counts. The UI reports active-probe output Tokens and does not label them as network traffic.
 +- Intermediary buffering can produce unusually high instantaneous Token/s, so thresholds require calibration for each route.
-+- Passive monitoring processes only complete successful streaming requests with enough visible output to calculate speed. Short and failed requests are ignored.
++- Passive monitoring processes only complete successful streaming requests with enough output to calculate speed. Short and failed requests are ignored.
++- A real request may legitimately return cached content, an existing file, or a long constant. Passive high TPS therefore only starts a fixed-prompt confirmation and cannot directly quarantine the node.
 +- The first run establishes an audit baseline. Cumulative statistics also begin when this version first writes state.
 +- Manual quality tests are diagnostic. They are excluded from automatic statistics and do not directly change quarantine state.
 +
@@ -2827,14 +2867,14 @@ index 0000000..2fe4e32
 +configuration validation, and private atomic state.
 diff --git a/tools/egress-quality-guard/README.zh-CN.md b/tools/egress-quality-guard/README.zh-CN.md
 new file mode 100644
-index 0000000..535188e
+index 0000000..02e8b24
 --- /dev/null
 +++ b/tools/egress-quality-guard/README.zh-CN.md
-@@ -0,0 +1,136 @@
+@@ -0,0 +1,138 @@
 +# 出口质量守护程序
 +
-+出口质量守护程序同时支持“真实请求审计被动检测”和“固定 Prompt 主动探测”。它会测量可见
-+Token 速度、首字时间、分块数量和指令标记是否完整；异常节点会被临时隔离，复测恢复后才重新启用。
++出口质量守护程序同时支持“真实请求审计被动检测”和“固定 Prompt 主动探测”。被动异常只作为
++候选信号；只有固定 Prompt 主动复测确认异常后，节点才会被临时隔离。
 +
 +它是启发式熔断器，不是模型智力鉴定器。上游或中间层缓冲也可能造成瞬时数千
 +Token/s，因此建议先观察 JSON 日志，再根据实际流量调整阈值。
@@ -2848,30 +2888,31 @@ index 0000000..535188e
 +
 +## 工作流程
 +
-+1. 被动检测每 5 秒读取普通成功流式请求的新增审计，并按 `(输出 Token - Reasoning Token) / (总耗时 - 首字耗时)` 重算可见速度。
++1. 被动检测每 5 秒读取普通成功流式请求的新增审计，并按 grok2api 面板同口径的 `输出 Token / (总耗时 - 首字耗时)` 计算速度；输出 Token 故意包含 Reasoning Token。
 +2. 主动检测调用仅管理员可访问的 `POST /api/admin/v1/egress-nodes/{id}/quality-test`。
 +3. grok2api 只从明确绑定到该节点的账号中选号，并发送固定流式 Prompt。
-+4. 硬阈值一次触发隔离；软阈值或探测错误需要连续命中。
-+5. 隔离节点仍可接受管理员探测，但不会承载普通用户请求。
-+6. 冷却结束后记录一次通用连接探测用于诊断，再以真实模型质量探测作为恢复判据，账号绑定保持不变。
++4. 普通真实请求超过 TPS 阈值时只立即触发一次固定 Prompt 主动复测，不能直接隔离节点。
++5. 主动复测达到硬阈值会立即隔离；主动软异常必须达到配置的连续次数。
++6. 隔离节点仍可接受管理员探测，但不会承载普通用户请求。
++7. 冷却结束后记录一次通用连接探测用于诊断，再以真实模型质量探测作为恢复判据，账号绑定保持不变。
 +
 +普通 `/v1/*` 请求不能指定出口节点，也不能绕过节点禁用状态。
 +
 +## 运行模式
 +
-+- `passive`：只检测普通请求审计，不额外消耗模型 Token；守护程序隔离的节点仍会执行恢复探测。
++- `passive`：轮询普通请求审计本身不消耗模型 Token；发现候选异常时会额外执行一次主动确认探测，守护程序隔离的节点仍会执行恢复探测。
 +- `active`：只按固定间隔逐节点主动测试。
 +- `hybrid`：同时开启两套检测器，推荐用于生产环境。
 +
-+被动检测会忽略非流式请求、失败请求、少于 32 个可见 Token 的短回答，以及守护程序自己产生的审计。首次启动只建立基线，不追溯历史异常；审计 ID 去重状态会持久化，重启后不会重复处理。
++被动检测会忽略非流式请求、失败请求、少于 32 个输出 Token 的短回答，以及守护程序自己产生的审计。首次启动只建立基线，不追溯历史异常；审计 ID 去重状态会持久化，重启后不会重复处理。
 +
 +通用 IP/Cloudflare 探针不作为恢复硬门槛：部分住宅出口可能无法访问探针站点，但访问 Grok 完全正常。真实模型质量请求才是最终判据。
 +
 +## 管理界面
 +
-+新版管理端左侧提供“质量守护”页面，显示守护进程新鲜度、当前模式、各节点可见 Token/s、首字延迟、打击计数、隔离状态和最近事件，也可以对单个节点立即执行一次真实模型质量检测。
++新版管理端左侧提供“质量守护”页面，显示守护进程新鲜度、当前模式、各节点与 grok2api 面板同口径的输出 Token/s、首字延迟、打击计数、隔离状态和最近事件，也可以对单个节点立即执行一次真实模型质量检测。
 +
-+页面还会显示自统计功能启用以来的自动检测次数、主动探测、被动审计、异常命中、隔离与恢复次数，以及主动探测产生的可见输出 Token。手动检测不计入累计值。代理的真实上下行字节数无法从 HTTPS/SSE 请求审计中可靠获得，因此页面不会用 Token 数伪装成代理流量。
++页面还会显示自统计功能启用以来的自动检测次数、主动探测、被动审计、异常命中、隔离与恢复次数，以及主动探测产生的输出 Token（包含推理 Token）。手动检测不计入累计值。代理的真实上下行字节数无法从 HTTPS/SSE 请求审计中可靠获得，因此页面不会用 Token 数伪装成代理流量。
 +
 +主服务只公开脱敏后的状态，并仅向独立的运行配置文件写入可编辑策略。Docker 部署时，将同一个状态卷挂载到主服务，并设置：
 +
@@ -2942,9 +2983,10 @@ index 0000000..535188e
 +
 +## 已知限制
 +
-+- HTTPS/SSE 请求审计无法可靠给出代理上下行字节数，界面只展示主动探测的可见输出 Token，不把它称为网络流量。
++- HTTPS/SSE 请求审计无法可靠给出代理上下行字节数，界面只展示主动探测的输出 Token，不把它称为网络流量。
 +- 中间层缓冲可能制造异常高的瞬时 Token/s，阈值需要根据自己的链路校准。
 +- 被动检测只处理完整、成功且可计算速度的流式请求；短回答和失败请求会被忽略。
++- 真实请求可能在输出已有文件、长常量或缓存内容，因此被动高 TPS 只会触发固定 Prompt 复测，不会直接隔离节点。
 +- 首次启动只建立被动审计基线，累计统计也从该版本首次写入状态时开始。
 +- 手动质量检测用于诊断，不计入自动检测累计统计，也不会直接改变隔离状态。
 +
@@ -3100,10 +3142,10 @@ index 0000000..d200d35
 +WantedBy=multi-user.target
 diff --git a/tools/egress-quality-guard/quality_guard.py b/tools/egress-quality-guard/quality_guard.py
 new file mode 100755
-index 0000000..505fe4e
+index 0000000..4194b8d
 --- /dev/null
 +++ b/tools/egress-quality-guard/quality_guard.py
-@@ -0,0 +1,904 @@
+@@ -0,0 +1,918 @@
 +#!/usr/bin/env python3
 +"""Active and passive quality guard for grok2api egress nodes.
 +
@@ -3431,10 +3473,14 @@ index 0000000..505fe4e
 +def classify_result(result: dict[str, Any], config: Config) -> tuple[str, str]:
 +    if not bool(result.get("expectedMatched")):
 +        return "soft", "expected_marker_missing"
-+    speed = float(result.get("visibleTokensPerSecond") or 0.0)
-+    visible_tokens = int(result.get("visibleTokens") or 0)
-+    if visible_tokens < 32:
-+        return "soft", "insufficient_visible_tokens"
++    output_tokens = int(result.get("outputTokens") or result.get("visibleTokens") or 0)
++    speed_value = result.get("outputTokensPerSecond")
++    if speed_value is None:
++        # Rolling upgrades may still expose panel-equivalent TPS under the legacy name.
++        speed_value = result.get("visibleTokensPerSecond")
++    speed = float(speed_value or 0.0)
++    if output_tokens < 32:
++        return "soft", "insufficient_output_tokens"
 +    if speed >= config.hard_tps:
 +        return "hard", "hard_tps"
 +    if speed >= config.soft_tps:
@@ -3452,15 +3498,15 @@ index 0000000..505fe4e
 +    if first_token_ms is None:
 +        return "ignored", "missing_first_token", 0.0, 0
 +    generation_ms = int(value.get("durationMs") or 0) - int(first_token_ms)
-+    visible_tokens = max(0, int(value.get("outputTokens") or 0) - int(value.get("reasoningTokens") or 0))
-+    if generation_ms <= 0 or visible_tokens < 32:
-+        return "ignored", "insufficient_visible_tokens", 0.0, visible_tokens
-+    speed = float(visible_tokens) * 1000 / float(generation_ms)
++    output_tokens = max(0, int(value.get("outputTokens") or 0))
++    if generation_ms <= 0 or output_tokens < 32:
++        return "ignored", "insufficient_output_tokens", 0.0, output_tokens
++    speed = float(output_tokens) * 1000 / float(generation_ms)
 +    if speed >= config.hard_tps:
-+        return "hard", "hard_tps", speed, visible_tokens
++        return "hard", "hard_tps", speed, output_tokens
 +    if speed >= config.soft_tps:
-+        return "soft", "soft_tps", speed, visible_tokens
-+    return "healthy", "within_threshold", speed, visible_tokens
++        return "soft", "soft_tps", speed, output_tokens
++    return "healthy", "within_threshold", speed, output_tokens
 +
 +
 +def default_node_state() -> dict[str, Any]:
@@ -3475,8 +3521,8 @@ index 0000000..505fe4e
 +        "last_observed_at": 0.0,
 +        "last_source": "",
 +        "last_classification": "",
-+        "last_visible_tps": 0.0,
-+        "last_visible_tokens": 0,
++        "last_output_tps": 0.0,
++        "last_output_tokens": 0,
 +        "last_first_token_ms": 0,
 +        "last_duration_ms": 0,
 +    }
@@ -3485,8 +3531,8 @@ index 0000000..505fe4e
 +def default_statistics() -> dict[str, Any]:
 +    return {
 +        "started_at": time.time(),
-+        "active": {"total": 0, "healthy": 0, "soft": 0, "hard": 0, "errors": 0, "visible_tokens": 0},
-+        "passive": {"total": 0, "healthy": 0, "soft": 0, "hard": 0, "visible_tokens": 0},
++        "active": {"total": 0, "healthy": 0, "soft": 0, "hard": 0, "errors": 0, "output_tokens": 0},
++        "passive": {"total": 0, "healthy": 0, "soft": 0, "hard": 0, "errors": 0, "output_tokens": 0},
 +        "actions": {"quarantined": 0, "restored": 0, "suppressed": 0},
 +    }
 +
@@ -3501,6 +3547,9 @@ index 0000000..505fe4e
 +        group = statistics.setdefault(group_name, {})
 +        if not isinstance(group, dict):
 +            raise RuntimeError("invalid quality guard statistics")
++        if group_name in {"active", "passive"}:
++            legacy_tokens = int(group.pop("visible_tokens", 0))
++            group.setdefault("output_tokens", legacy_tokens)
 +        for field, default in defaults[group_name].items():
 +            group.setdefault(field, default)
 +            if isinstance(group[field], bool) or not isinstance(group[field], int) or group[field] < 0:
@@ -3605,6 +3654,8 @@ index 0000000..505fe4e
 +        legacy_strikes = int(current.pop("soft_strikes", 0))
 +        current.setdefault("active_soft_strikes", legacy_strikes)
 +        current.setdefault("passive_soft_strikes", 0)
++        current.setdefault("last_output_tps", float(current.pop("last_visible_tps", 0.0)))
++        current.setdefault("last_output_tokens", int(current.pop("last_visible_tokens", 0)))
 +        for key, value in default_node_state().items():
 +            current.setdefault(key, value)
 +        return current
@@ -3656,21 +3707,27 @@ index 0000000..505fe4e
 +    def _record_probe(self, node: dict[str, Any], result: dict[str, Any], classification: str, reason: str, now: float) -> None:
 +        node_id = str(node["id"])
 +        state = self._state_for(node_id)
++        output_tokens = int(result.get("outputTokens") or result.get("visibleTokens") or 0)
++        output_tps_value = result.get("outputTokensPerSecond")
++        if output_tps_value is None:
++            output_tps_value = result.get("visibleTokensPerSecond")
++        output_tps = float(output_tps_value or 0.0)
 +        state["last_probe_at"] = now
 +        state.update({
 +            "last_observed_at": now,
 +            "last_source": "active",
 +            "last_classification": classification,
-+            "last_visible_tps": round(float(result.get("visibleTokensPerSecond") or 0.0), 3),
-+            "last_visible_tokens": int(result.get("visibleTokens") or 0),
++            "last_output_tps": round(output_tps, 3),
++            "last_output_tokens": output_tokens,
 +            "last_first_token_ms": int(result.get("firstTokenMs") or 0),
 +            "last_duration_ms": int(result.get("durationMs") or 0),
 +        })
 +        state["error_strikes"] = 0
 +        self._bump_statistic("active", classification)
-+        self._bump_statistic("active", "visible_tokens", int(result.get("visibleTokens") or 0))
++        self._bump_statistic("active", "output_tokens", output_tokens)
 +        if classification == "healthy":
 +            state["active_soft_strikes"] = 0
++            state["passive_soft_strikes"] = 0
 +        elif classification == "soft":
 +            state["active_soft_strikes"] = int(state.get("active_soft_strikes", 0)) + 1
 +        else:
@@ -3681,15 +3738,15 @@ index 0000000..505fe4e
 +            node_name=node.get("name"),
 +            classification=classification,
 +            reason=reason,
-+            visible_tps=round(float(result.get("visibleTokensPerSecond") or 0.0), 3),
-+            visible_tokens=int(result.get("visibleTokens") or 0),
++            output_tps=round(output_tps, 3),
++            output_tokens=output_tokens,
 +            first_token_ms=int(result.get("firstTokenMs") or 0),
 +            duration_ms=int(result.get("durationMs") or 0),
 +            chunk_count=int(result.get("chunkCount") or 0),
 +            expected_matched=bool(result.get("expectedMatched")),
 +        )
 +
-+    def _probe_active(self, nodes: list[dict[str, Any]], node: dict[str, Any], now: float) -> None:
++    def _probe_active(self, nodes: list[dict[str, Any]], node: dict[str, Any], now: float, trigger: str = "scheduled") -> None:
 +        node_id = str(node["id"])
 +        state = self._state_for(node_id)
 +        self._bump_statistic("active", "total")
@@ -3699,8 +3756,8 @@ index 0000000..505fe4e
 +            self._bump_statistic("active", "errors")
 +            state["error_strikes"] = int(state.get("error_strikes", 0)) + 1
 +            state["last_probe_at"] = now
-+            log_event("quality_probe_failed", node_id=node_id, node_name=node.get("name"), error_type=type(exc).__name__, strikes=state["error_strikes"])
-+            if state["error_strikes"] >= self.config.consecutive_errors:
++            log_event("quality_probe_failed", node_id=node_id, node_name=node.get("name"), trigger=trigger, error_type=type(exc).__name__, strikes=state["error_strikes"])
++            if trigger == "scheduled" and state["error_strikes"] >= self.config.consecutive_errors:
 +                self._quarantine(nodes, node, "probe_errors", now)
 +            return
 +        classification, reason = classify_result(result, self.config)
@@ -3839,18 +3896,18 @@ index 0000000..505fe4e
 +    def _record_passive_audit(self, all_nodes: list[dict[str, Any]], node: dict[str, Any], audit_value: dict[str, Any], now: float) -> None:
 +        node_id = str(node["id"])
 +        state = self._state_for(node_id)
-+        classification, reason, speed, visible_tokens = classify_audit(audit_value, self.config)
++        classification, reason, speed, output_tokens = classify_audit(audit_value, self.config)
 +        if classification == "ignored":
 +            return
 +        self._bump_statistic("passive", "total")
 +        self._bump_statistic("passive", classification)
-+        self._bump_statistic("passive", "visible_tokens", visible_tokens)
++        self._bump_statistic("passive", "output_tokens", output_tokens)
 +        state.update({
 +            "last_observed_at": now,
 +            "last_source": "passive",
 +            "last_classification": classification,
-+            "last_visible_tps": round(speed, 3),
-+            "last_visible_tokens": visible_tokens,
++            "last_output_tps": round(speed, 3),
++            "last_output_tokens": output_tokens,
 +            "last_first_token_ms": int(audit_value.get("firstTokenMs") or 0),
 +            "last_duration_ms": int(audit_value.get("durationMs") or 0),
 +        })
@@ -3868,7 +3925,7 @@ index 0000000..505fe4e
 +            node_name=node.get("name"),
 +            reason=reason,
 +            classification=classification,
-+            visible_tps=round(speed, 3),
++            output_tps=round(speed, 3),
 +        )
 +        log_event(
 +            "passive_audit_anomaly",
@@ -3877,14 +3934,13 @@ index 0000000..505fe4e
 +            node_name=node.get("name"),
 +            classification=classification,
 +            reason=reason,
-+            visible_tps=round(speed, 3),
-+            visible_tokens=visible_tokens,
++            output_tps=round(speed, 3),
++            output_tokens=output_tokens,
 +            first_token_ms=int(audit_value.get("firstTokenMs") or 0),
 +            duration_ms=int(audit_value.get("durationMs") or 0),
 +            strikes=int(state.get("passive_soft_strikes", 0)),
 +        )
-+        if classification == "hard" or int(state.get("passive_soft_strikes", 0)) >= self.config.consecutive_soft:
-+            self._quarantine(all_nodes, node, "passive_" + reason, now)
++        self._probe_active(all_nodes, node, now, trigger="passive_confirmation")
 +
 +    def run_passive_cycle(self) -> None:
 +        now = time.time()
@@ -4010,10 +4066,10 @@ index 0000000..505fe4e
 +    raise SystemExit(main())
 diff --git a/tools/egress-quality-guard/quality_guard_test.py b/tools/egress-quality-guard/quality_guard_test.py
 new file mode 100644
-index 0000000..fefd924
+index 0000000..a2dd6f2
 --- /dev/null
 +++ b/tools/egress-quality-guard/quality_guard_test.py
-@@ -0,0 +1,239 @@
+@@ -0,0 +1,309 @@
 +import importlib.util
 +import stat
 +import sys
@@ -4048,24 +4104,24 @@ index 0000000..fefd924
 +class ClassificationTests(unittest.TestCase):
 +    def test_healthy_soft_and_hard_thresholds(self):
 +        cfg = config()
-+        self.assertEqual(quality_guard.classify_result({"expectedMatched": True, "visibleTokens": 100, "visibleTokensPerSecond": 499}, cfg)[0], "healthy")
-+        self.assertEqual(quality_guard.classify_result({"expectedMatched": True, "visibleTokens": 100, "visibleTokensPerSecond": 500}, cfg)[0], "soft")
-+        self.assertEqual(quality_guard.classify_result({"expectedMatched": True, "visibleTokens": 100, "visibleTokensPerSecond": 1000}, cfg)[0], "hard")
++        self.assertEqual(quality_guard.classify_result({"expectedMatched": True, "outputTokens": 100, "outputTokensPerSecond": 499}, cfg)[0], "healthy")
++        self.assertEqual(quality_guard.classify_result({"expectedMatched": True, "outputTokens": 100, "outputTokensPerSecond": 500}, cfg)[0], "soft")
++        self.assertEqual(quality_guard.classify_result({"expectedMatched": True, "outputTokens": 100, "outputTokensPerSecond": 1000}, cfg)[0], "hard")
 +
 +    def test_missing_marker_and_short_response_are_soft_failures(self):
 +        cfg = config()
-+        self.assertEqual(quality_guard.classify_result({"expectedMatched": False, "visibleTokens": 100, "visibleTokensPerSecond": 10}, cfg), ("soft", "expected_marker_missing"))
-+        self.assertEqual(quality_guard.classify_result({"expectedMatched": True, "visibleTokens": 12, "visibleTokensPerSecond": 10}, cfg), ("soft", "insufficient_visible_tokens"))
++        self.assertEqual(quality_guard.classify_result({"expectedMatched": False, "outputTokens": 100, "outputTokensPerSecond": 10}, cfg), ("soft", "expected_marker_missing"))
++        self.assertEqual(quality_guard.classify_result({"expectedMatched": True, "outputTokens": 12, "outputTokensPerSecond": 10}, cfg), ("soft", "insufficient_output_tokens"))
 +
-+    def test_passive_speed_excludes_reasoning_tokens(self):
++    def test_passive_speed_matches_panel_and_includes_reasoning_tokens(self):
 +        cfg = config()
-+        classification, reason, speed, visible = quality_guard.classify_audit({
++        classification, reason, speed, output = quality_guard.classify_audit({
 +            "provider": "grok_build", "streaming": True, "statusCode": 200,
 +            "firstTokenMs": 1000, "durationMs": 1100,
 +            "outputTokens": 1050, "reasoningTokens": 950,
 +        }, cfg)
-+        self.assertEqual((classification, reason, visible), ("hard", "hard_tps", 100))
-+        self.assertEqual(speed, 1000)
++        self.assertEqual((classification, reason, output), ("hard", "hard_tps", 1050))
++        self.assertEqual(speed, 10500)
 +
 +    def test_passive_ignores_short_and_failed_requests(self):
 +        cfg = config()
@@ -4124,11 +4180,13 @@ index 0000000..fefd924
 +        self.results = list(results)
 +        self.audit_pages = list(audit_pages or [])
 +        self.enabled_calls = []
++        self.quality_calls = []
 +
 +    def list_nodes(self):
 +        return self.nodes
 +
-+    def quality_test(self, _node_id):
++    def quality_test(self, node_id):
++        self.quality_calls.append(node_id)
 +        value = self.results.pop(0)
 +        if isinstance(value, Exception):
 +            raise value
@@ -4163,8 +4221,8 @@ index 0000000..fefd924
 +                lock_file=Path(directory) / "lock",
 +                node_ids=("1",),
 +            )
-+            bad = {"expectedMatched": True, "visibleTokens": 100, "visibleTokensPerSecond": 1200}
-+            good = {"expectedMatched": True, "visibleTokens": 100, "visibleTokensPerSecond": 100}
++            bad = {"expectedMatched": True, "outputTokens": 100, "outputTokensPerSecond": 1200}
++            good = {"expectedMatched": True, "outputTokens": 100, "outputTokensPerSecond": 100}
 +            api = FakeApi(self.nodes(), [bad, good])
 +            guard = quality_guard.Guard(cfg, api)
 +            guard.run_cycle()
@@ -4176,7 +4234,7 @@ index 0000000..fefd924
 +            self.assertEqual(api.enabled_calls, [("1", False), ("1", True)])
 +            self.assertFalse(state["disabled_by_guard"])
 +            self.assertEqual(guard.state["statistics"]["active"], {
-+                "total": 2, "healthy": 1, "soft": 0, "hard": 1, "errors": 0, "visible_tokens": 200,
++                "total": 2, "healthy": 1, "soft": 0, "hard": 1, "errors": 0, "output_tokens": 200,
 +            })
 +            self.assertEqual(guard.state["statistics"]["actions"]["quarantined"], 1)
 +            self.assertEqual(guard.state["statistics"]["actions"]["restored"], 1)
@@ -4189,7 +4247,7 @@ index 0000000..fefd924
 +                node_ids=("1",),
 +                min_healthy_nodes=3,
 +            )
-+            bad = {"expectedMatched": True, "visibleTokens": 100, "visibleTokensPerSecond": 1200}
++            bad = {"expectedMatched": True, "outputTokens": 100, "outputTokensPerSecond": 1200}
 +            api = FakeApi(self.nodes(3), [bad])
 +            guard = quality_guard.Guard(cfg, api)
 +            guard.run_cycle()
@@ -4201,7 +4259,7 @@ index 0000000..fefd924
 +            cfg = config(state_file=Path(directory) / "state.json", lock_file=Path(directory) / "lock", node_ids=("1",))
 +            nodes = self.nodes()
 +            nodes[0]["enabled"] = False
-+            api = FakeApi(nodes, [{"expectedMatched": True, "visibleTokens": 100, "visibleTokensPerSecond": 100}])
++            api = FakeApi(nodes, [{"expectedMatched": True, "outputTokens": 100, "outputTokensPerSecond": 100}])
 +            api.connectivity_test = lambda _node_id: {"status": "unhealthy"}
 +            guard = quality_guard.Guard(cfg, api)
 +            state = guard._state_for("1")
@@ -4222,31 +4280,99 @@ index 0000000..fefd924
 +            self.assertTrue(guard.state["passive_initialized"])
 +            self.assertIn("old", guard.state["seen_audit_ids"])
 +
-+    def test_passive_hard_signal_quarantines_but_ignores_guard_key(self):
++    def test_passive_hard_signal_requires_active_confirmation_and_ignores_guard_key(self):
 +        with tempfile.TemporaryDirectory() as directory:
 +            cfg = config(state_file=Path(directory) / "state.json", lock_file=Path(directory) / "lock", mode="passive")
-+            api = FakeApi(self.nodes(), [], [
++            healthy = {"expectedMatched": True, "outputTokens": 100, "outputTokensPerSecond": 100}
++            api = FakeApi(self.nodes(), [healthy], [
 +                {"items": [], "hasMore": False, "nextCursor": ""},
 +                {"items": [self.audit("guard", "1", 1200, client_key_id="1"), self.audit("user", "2", 1200)], "hasMore": False, "nextCursor": ""},
 +            ])
 +            guard = quality_guard.Guard(cfg, api)
 +            guard.run_passive_cycle()
 +            guard.run_passive_cycle()
-+            self.assertEqual(api.enabled_calls, [("2", False)])
++            self.assertEqual(api.quality_calls, ["2"])
++            self.assertEqual(api.enabled_calls, [])
 +            self.assertFalse(guard.state["nodes"].get("1", {}).get("disabled_by_guard", False))
-+            self.assertTrue(guard.state["nodes"]["2"]["disabled_by_guard"])
++            self.assertFalse(guard.state["nodes"]["2"]["disabled_by_guard"])
++            self.assertEqual(guard.state["nodes"]["2"]["passive_soft_strikes"], 0)
 +            self.assertEqual(guard.state["statistics"]["passive"]["total"], 1)
 +            self.assertEqual(guard.state["statistics"]["passive"]["hard"], 1)
 +
++    def test_passive_hard_signal_quarantines_after_active_hard_confirmation(self):
++        with tempfile.TemporaryDirectory() as directory:
++            cfg = config(state_file=Path(directory) / "state.json", lock_file=Path(directory) / "lock", mode="passive")
++            hard = {"expectedMatched": True, "outputTokens": 100, "outputTokensPerSecond": 1200}
++            api = FakeApi(self.nodes(), [hard], [
++                {"items": [], "hasMore": False, "nextCursor": ""},
++                {"items": [self.audit("user", "2", 1200)], "hasMore": False, "nextCursor": ""},
++            ])
++            guard = quality_guard.Guard(cfg, api)
++            guard.run_passive_cycle()
++            guard.run_passive_cycle()
++            self.assertEqual(api.quality_calls, ["2"])
++            self.assertEqual(api.enabled_calls, [("2", False)])
++            self.assertTrue(guard.state["nodes"]["2"]["disabled_by_guard"])
++
++    def test_passive_signals_quarantine_only_after_consecutive_active_soft_confirmations(self):
++        with tempfile.TemporaryDirectory() as directory:
++            cfg = config(state_file=Path(directory) / "state.json", lock_file=Path(directory) / "lock", mode="passive")
++            soft = {"expectedMatched": True, "outputTokens": 100, "outputTokensPerSecond": 600}
++            api = FakeApi(self.nodes(), [soft, soft], [
++                {"items": [], "hasMore": False, "nextCursor": ""},
++                {"items": [self.audit("user-1", "2", 1200)], "hasMore": False, "nextCursor": ""},
++                {"items": [self.audit("user-2", "2", 1200)], "hasMore": False, "nextCursor": ""},
++            ])
++            guard = quality_guard.Guard(cfg, api)
++            guard.run_passive_cycle()
++            guard.run_passive_cycle()
++            self.assertEqual(api.enabled_calls, [])
++            self.assertEqual(guard.state["nodes"]["2"]["active_soft_strikes"], 1)
++            guard.run_passive_cycle()
++            self.assertEqual(api.quality_calls, ["2", "2"])
++            self.assertEqual(api.enabled_calls, [("2", False)])
++            self.assertTrue(guard.state["nodes"]["2"]["disabled_by_guard"])
++
++    def test_multiple_passive_hard_signals_each_require_healthy_active_confirmation(self):
++        with tempfile.TemporaryDirectory() as directory:
++            cfg = config(state_file=Path(directory) / "state.json", lock_file=Path(directory) / "lock", mode="passive")
++            healthy = {"expectedMatched": True, "outputTokens": 100, "outputTokensPerSecond": 100}
++            api = FakeApi(self.nodes(), [healthy, healthy], [
++                {"items": [], "hasMore": False, "nextCursor": ""},
++                {"items": [self.audit("user-1", "2", 1200), self.audit("user-2", "2", 1500)], "hasMore": False, "nextCursor": ""},
++            ])
++            guard = quality_guard.Guard(cfg, api)
++            guard.run_passive_cycle()
++            guard.run_passive_cycle()
++            self.assertEqual(api.quality_calls, ["2", "2"])
++            self.assertEqual(api.enabled_calls, [])
++            self.assertEqual(guard.state["nodes"]["2"]["passive_soft_strikes"], 0)
++
++    def test_passive_confirmation_errors_do_not_quarantine(self):
++        with tempfile.TemporaryDirectory() as directory:
++            cfg = config(
++                state_file=Path(directory) / "state.json", lock_file=Path(directory) / "lock",
++                mode="passive", consecutive_errors=1,
++            )
++            api = FakeApi(self.nodes(), [RuntimeError("probe unavailable")], [
++                {"items": [], "hasMore": False, "nextCursor": ""},
++                {"items": [self.audit("user", "2", 1200)], "hasMore": False, "nextCursor": ""},
++            ])
++            guard = quality_guard.Guard(cfg, api)
++            guard.run_passive_cycle()
++            guard.run_passive_cycle()
++            self.assertEqual(api.enabled_calls, [])
++            self.assertEqual(guard.state["nodes"]["2"]["error_strikes"], 1)
++
 +    @staticmethod
-+    def audit(audit_id, node_id, visible_tps, client_key_id="99"):
++    def audit(audit_id, node_id, output_tps, client_key_id="99"):
 +        generation_ms = 100
-+        visible_tokens = int(visible_tps * generation_ms / 1000)
++        output_tokens = int(output_tps * generation_ms / 1000)
 +        return {
 +            "id": audit_id, "requestId": f"request-{audit_id}", "clientKeyId": client_key_id,
 +            "clientKeyName": "user", "provider": "grok_build", "streaming": True,
 +            "statusCode": 200, "firstTokenMs": 1000, "durationMs": 1000 + generation_ms,
-+            "outputTokens": visible_tokens + 100, "reasoningTokens": 100,
++            "outputTokens": output_tokens, "reasoningTokens": min(100, max(0, output_tokens - 1)),
 +            "egressNodeId": node_id, "errorCode": None,
 +        }
 +

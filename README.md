@@ -6,7 +6,7 @@
 
 - 上游版本：`v3.0.11`
 - 上游提交：`090104504b403d65675a01dab9c92b3a235ee832`
-- 补丁提交：`137589c33ce5106317b496dc699dac6b6b4c98cc`
+- 补丁提交：`690a641deb06c5c1a73983677f6b454557727113`
 - 上游 Draft PR：[chenyme/grok2api#837](https://github.com/chenyme/grok2api/pull/837)
 - 可运行 Fork：[lij768423-svg/grok2api](https://github.com/lij768423-svg/grok2api/tree/agent/egress-resilience-quality-guard)
 
@@ -23,13 +23,13 @@
 
 ### 出口质量守护
 
-- 被动审计真实成功流式请求，计算可见 Token/s。
-- 定时执行固定 Prompt 的逐节点主动探测。
-- 软/硬阈值、连续错误、最低健康节点、隔离和恢复保护。
+- 被动审计按 grok2api 面板同口径计算 `输出 Token / (总耗时 - 首字耗时)`，其中输出 Token 包含推理 Token。
+- 被动高 TPS 只触发固定 Prompt 的逐节点主动复测，普通真实请求不会因一次高 TPS 直接隔离节点。
+- 主动软/硬阈值、连续错误、最低健康节点、隔离和恢复保护。
 - 管理端质量守护页面、手动诊断、策略热加载和累计统计。
 - 独立 Python sidecar、Docker Compose、systemd、安全说明和中英文文档。
 
-质量守护是启发式熔断器，不是模型能力鉴定器。中间层缓冲也可能造成异常高的瞬时 Token/s。
+质量守护是启发式熔断器，不是模型能力鉴定器。中间层缓冲、已有文件、长常量或缓存内容都可能造成异常高的真实请求瞬时 Token/s，因此必须以固定 Prompt 主动复测确认。
 
 ## 直接应用
 
