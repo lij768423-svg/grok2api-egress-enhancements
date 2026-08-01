@@ -18,8 +18,12 @@ func TestAllowedGrokManagementPath(t *testing.T) {
 		{input: "/nodes/9/test", want: "/api/admin/v1/egress-nodes/9/test", ok: true},
 		{input: "/nodes/9/quality-test", want: "/api/admin/v1/egress-nodes/9/quality-test", ok: true},
 		{input: "/quality-guard/nodes/9/test", want: "/api/admin/v1/egress-quality-guard/nodes/9/test", ok: true},
+		{input: "/accounts/export", want: "/api/admin/v1/accounts/export", ok: true},
+		{input: "/nodes/9/accounts", want: "/api/admin/v1/egress-nodes/9/accounts", ok: true},
+		{input: "/nodes/accounts", want: "/api/admin/v1/egress-nodes/accounts", ok: true},
 		{input: "/nodes/../accounts", ok: false},
-		{input: "/accounts", ok: false},
+		{input: "/accounts", want: "/api/admin/v1/accounts", ok: true},
+		{input: "/accounts/%2e%2e/settings", ok: false},
 	}
 	for _, test := range tests {
 		t.Run(test.input, func(t *testing.T) {
@@ -31,15 +35,27 @@ func TestAllowedGrokManagementPath(t *testing.T) {
 	}
 }
 
+func TestAllowedGrokManagementMethodProtectsCredentialExport(t *testing.T) {
+	if allowedGrokManagementMethod(http.MethodGet, "/accounts/export") {
+		t.Fatal("GET account export must remain blocked")
+	}
+	if !allowedGrokManagementMethod(http.MethodPost, "/accounts/export") {
+		t.Fatal("selected POST account export must be allowed")
+	}
+}
+
 func TestRenderStatusPageEmbedsTokens(t *testing.T) {
 	page := string(renderStatusPage())
-	for _, want := range []string{"Grok2API 出口守护", "--background:", "data-batch=\"enable\"", "X-Grok2API-Egress-UI"} {
+	for _, want := range []string{"Grok2API 管理工作台", "--background:", "data-view=\"accounts\"", "X-Grok2API-Egress-UI", "导出选中"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("rendered page missing %q", want)
 		}
 	}
 	if strings.Contains(page, "/*__HALLMARK_TOKENS__*/") {
 		t.Fatal("token placeholder was not replaced")
+	}
+	if strings.Contains(page, "/*__APP_STYLES__*/") || strings.Contains(page, "/*__APP_SCRIPT__*/") {
+		t.Fatal("app placeholders were not replaced")
 	}
 }
 

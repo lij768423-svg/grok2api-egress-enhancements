@@ -41,7 +41,7 @@
 
 ### CPA 管理插件
 
-`cpa-plugin/go` 提供可选的 CLIProxyAPI 动态插件，支持节点增删改、批量启停/删除、连通性检测、真实质量检测、策略编辑、统计事件和深浅色模式。构建与部署方法见 [cpa-plugin/README.md](./cpa-plugin/README.md)。
+`cpa-plugin/go` 提供可选的 CLIProxyAPI 动态插件。`v0.4.0` 已扩展为 CPA 内的 Grok2API 管理工作台，包含概览、账号、出口守护、模型、Client Key、请求审计和完整设置七个工作区；账号支持筛选、批量操作、出口绑定，以及经过二次确认的“仅导出选中账号”。插件不会向浏览器暴露 Grok2API 管理 Token，也不会开放静默整库导出。构建与部署方法见 [cpa-plugin/README.md](./cpa-plugin/README.md)。
 
 质量守护是启发式熔断器，不是模型能力鉴定器。中间层缓冲、已有文件、长常量或缓存内容可能造成异常高瞬时 Token/s。硬阈值策略偏激进，可按链路调高 `hard_tps`；软阈值仍以固定 Prompt 复测确认。
 

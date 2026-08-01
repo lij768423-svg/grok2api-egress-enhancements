@@ -79,7 +79,7 @@ import (
 
 const (
 	pluginName           = "grok2api-egress"
-	pluginVersion        = "0.3.0"
+	pluginVersion        = "0.4.0"
 	resourcePath         = "/status"
 	managementAPIPath    = "/v0/management/grok2api-egress/api"
 	resourceContentType  = "text/html; charset=utf-8"
@@ -96,6 +96,12 @@ var pageTemplate string
 
 //go:embed tokens.css
 var tokenCSS string
+
+//go:embed app.css
+var appCSS string
+
+//go:embed app.js
+var appJS string
 
 type envelope struct {
 	OK     bool            `json:"ok"`
@@ -462,6 +468,9 @@ func proxyGrokManagement(req managementRequest, path, base string) ([]byte, erro
 	if method == "" {
 		method = http.MethodGet
 	}
+	if !allowedGrokManagementMethod(method, relative) {
+		return managementJSONResponse(http.StatusMethodNotAllowed, []byte(`{"error":{"code":"methodNotAllowed","message":"method not allowed"}}`))
+	}
 	switch method {
 	case http.MethodGet, http.MethodPost, http.MethodPut, http.MethodPatch, http.MethodDelete:
 	default:
@@ -470,10 +479,10 @@ func proxyGrokManagement(req managementRequest, path, base string) ([]byte, erro
 	if len(req.Body) > maxProxyRequestBody {
 		return managementJSONResponse(http.StatusRequestEntityTooLarge, []byte(`{"error":{"code":"requestTooLarge","message":"request body is too large"}}`))
 	}
-	status, contentType, body := doGrokManagementRequest(method, upstreamPath, req.Query, req.Body)
+	status, headers, body := doGrokManagementRequest(method, upstreamPath, req.Query, req.Body)
 	return okEnvelope(managementResponse{
 		StatusCode: status,
-		Headers:    http.Header{"content-type": []string{contentType}},
+		Headers:    headers,
 		Body:       body,
 	})
 }
@@ -493,6 +502,31 @@ func allowedGrokManagementPath(relative string) (string, bool) {
 	}
 	parts := strings.Split(strings.Trim(clean, "/"), "/")
 	switch {
+	case clean == "/dashboard":
+		return "/api/admin/v1/dashboard", true
+	case clean == "/accounts", clean == "/accounts/summary", clean == "/accounts/export", clean == "/accounts/batch",
+		clean == "/accounts/batch/refresh-quotas", clean == "/accounts/batch/refresh-tokens":
+		return "/api/admin/v1" + clean, true
+	case len(parts) == 2 && parts[0] == "accounts" && safePathID(parts[1]):
+		return "/api/admin/v1/accounts/" + url.PathEscape(parts[1]), true
+	case len(parts) == 3 && parts[0] == "accounts" && safePathID(parts[1]) && (parts[2] == "refresh-token" || parts[2] == "refresh-billing" || parts[2] == "refresh-quota"):
+		return "/api/admin/v1/accounts/" + url.PathEscape(parts[1]) + "/" + parts[2], true
+	case clean == "/models", clean == "/models/accounts", clean == "/models/sync", clean == "/models/batch":
+		return "/api/admin/v1" + clean, true
+	case len(parts) == 2 && parts[0] == "models" && safePathID(parts[1]):
+		return "/api/admin/v1/models/" + url.PathEscape(parts[1]), true
+	case clean == "/client-keys", clean == "/client-keys/batch":
+		return "/api/admin/v1" + clean, true
+	case len(parts) == 2 && parts[0] == "client-keys" && safePathID(parts[1]):
+		return "/api/admin/v1/client-keys/" + url.PathEscape(parts[1]), true
+	case len(parts) == 3 && parts[0] == "client-keys" && safePathID(parts[1]) && parts[2] == "secret":
+		return "/api/admin/v1/client-keys/" + url.PathEscape(parts[1]) + "/secret", true
+	case clean == "/request-audits", clean == "/request-audits/summary":
+		return "/api/admin/v1" + clean, true
+	case len(parts) == 2 && parts[0] == "request-audits" && safePathID(parts[1]):
+		return "/api/admin/v1/request-audits/" + url.PathEscape(parts[1]), true
+	case clean == "/settings":
+		return "/api/admin/v1/settings", true
 	case clean == "/quality-guard":
 		return "/api/admin/v1/egress-quality-guard", true
 	case clean == "/quality-guard/config":
@@ -501,14 +535,34 @@ func allowedGrokManagementPath(relative string) (string, bool) {
 		return "/api/admin/v1/egress-quality-guard/nodes/" + url.PathEscape(parts[2]) + "/test", true
 	case clean == "/nodes", clean == "/nodes/batch", clean == "/nodes/test":
 		return "/api/admin/v1/egress-nodes" + strings.TrimPrefix(clean, "/nodes"), true
+	case clean == "/nodes/accounts":
+		return "/api/admin/v1/egress-nodes/accounts", true
 	case len(parts) == 2 && parts[0] == "nodes" && safePathID(parts[1]):
 		return "/api/admin/v1/egress-nodes/" + url.PathEscape(parts[1]), true
+	case len(parts) == 3 && parts[0] == "nodes" && safePathID(parts[1]) && parts[2] == "accounts":
+		return "/api/admin/v1/egress-nodes/" + url.PathEscape(parts[1]) + "/accounts", true
 	case len(parts) == 3 && parts[0] == "nodes" && safePathID(parts[1]) && parts[2] == "test":
 		return "/api/admin/v1/egress-nodes/" + url.PathEscape(parts[1]) + "/test", true
 	case len(parts) == 3 && parts[0] == "nodes" && safePathID(parts[1]) && parts[2] == "quality-test":
 		return "/api/admin/v1/egress-nodes/" + url.PathEscape(parts[1]) + "/quality-test", true
 	default:
 		return "", false
+	}
+}
+
+func allowedGrokManagementMethod(method, relative string) bool {
+	clean := "/" + strings.TrimLeft(strings.TrimSpace(relative), "/")
+	switch clean {
+	case "/accounts/export":
+		return method == http.MethodPost
+	case "/dashboard", "/accounts/summary", "/request-audits", "/request-audits/summary", "/quality-guard":
+		return method == http.MethodGet
+	case "/settings":
+		return method == http.MethodGet || method == http.MethodPut
+	case "/nodes/accounts":
+		return method == http.MethodDelete
+	default:
+		return true
 	}
 }
 
@@ -525,7 +579,7 @@ func safePathID(value string) bool {
 	return true
 }
 
-func doGrokManagementRequest(method, path string, query url.Values, body []byte) (int, string, []byte) {
+func doGrokManagementRequest(method, path string, query url.Values, body []byte) (int, http.Header, []byte) {
 	cfg := loadConfig()
 	requestURL := cfg.Grok2APIBaseURL + path
 	if encoded := query.Encode(); encoded != "" {
@@ -534,11 +588,11 @@ func doGrokManagementRequest(method, path string, query url.Values, body []byte)
 	for attempt := 0; attempt < 2; attempt++ {
 		token, errToken := grokAdmin.accessToken(cfg)
 		if errToken != nil {
-			return http.StatusServiceUnavailable, "application/json; charset=utf-8", proxyErrorJSON("grok2apiAuthUnavailable", errToken.Error())
+			return http.StatusServiceUnavailable, jsonResponseHeaders(), proxyErrorJSON("grok2apiAuthUnavailable", errToken.Error())
 		}
 		request, errRequest := http.NewRequest(method, requestURL, bytes.NewReader(body))
 		if errRequest != nil {
-			return http.StatusBadGateway, "application/json; charset=utf-8", proxyErrorJSON("grok2apiRequestFailed", "无法创建 grok2api 请求")
+			return http.StatusBadGateway, jsonResponseHeaders(), proxyErrorJSON("grok2apiRequestFailed", "无法创建 grok2api 请求")
 		}
 		request.Header.Set("Authorization", "Bearer "+token)
 		request.Header.Set("Accept", "application/json")
@@ -552,27 +606,36 @@ func doGrokManagementRequest(method, path string, query url.Values, body []byte)
 		}
 		response, errDo := (&http.Client{Timeout: timeout}).Do(request)
 		if errDo != nil {
-			return http.StatusBadGateway, "application/json; charset=utf-8", proxyErrorJSON("grok2apiUnavailable", "grok2api 请求失败")
+			return http.StatusBadGateway, jsonResponseHeaders(), proxyErrorJSON("grok2apiUnavailable", "grok2api 请求失败")
 		}
 		responseBody, errRead := io.ReadAll(io.LimitReader(response.Body, maxProxyResponseBody+1))
 		_ = response.Body.Close()
 		if errRead != nil {
-			return http.StatusBadGateway, "application/json; charset=utf-8", proxyErrorJSON("grok2apiInvalidResponse", "读取 grok2api 响应失败")
+			return http.StatusBadGateway, jsonResponseHeaders(), proxyErrorJSON("grok2apiInvalidResponse", "读取 grok2api 响应失败")
 		}
 		if len(responseBody) > maxProxyResponseBody {
-			return http.StatusBadGateway, "application/json; charset=utf-8", proxyErrorJSON("grok2apiResponseTooLarge", "grok2api 响应过大")
+			return http.StatusBadGateway, jsonResponseHeaders(), proxyErrorJSON("grok2apiResponseTooLarge", "grok2api 响应过大")
 		}
 		if response.StatusCode == http.StatusUnauthorized && attempt == 0 {
 			grokAdmin.reset()
 			continue
 		}
-		contentType := response.Header.Get("Content-Type")
-		if contentType == "" {
-			contentType = "application/json; charset=utf-8"
+		headers := jsonResponseHeaders()
+		if contentType := response.Header.Get("Content-Type"); contentType != "" {
+			headers.Set("Content-Type", contentType)
 		}
-		return response.StatusCode, contentType, responseBody
+		for _, name := range []string{"Content-Disposition", "Cache-Control", "Pragma", "X-Content-Type-Options", "X-Exported-Accounts"} {
+			if value := response.Header.Get(name); value != "" {
+				headers.Set(name, value)
+			}
+		}
+		return response.StatusCode, headers, responseBody
 	}
-	return http.StatusUnauthorized, "application/json; charset=utf-8", proxyErrorJSON("grok2apiAuthFailed", "grok2api 管理认证失败")
+	return http.StatusUnauthorized, jsonResponseHeaders(), proxyErrorJSON("grok2apiAuthFailed", "grok2api 管理认证失败")
+}
+
+func jsonResponseHeaders() http.Header {
+	return http.Header{"content-type": []string{"application/json; charset=utf-8"}}
 }
 
 func proxyErrorJSON(code, message string) []byte {
@@ -851,7 +914,10 @@ func probeGrok2API(cfg pluginConfig) map[string]any {
 }
 
 func renderStatusPage() []byte {
-	return []byte(strings.Replace(pageTemplate, "/*__HALLMARK_TOKENS__*/", tokenCSS, 1))
+	page := strings.Replace(pageTemplate, "/*__HALLMARK_TOKENS__*/", tokenCSS, 1)
+	page = strings.Replace(page, "/*__APP_STYLES__*/", appCSS, 1)
+	page = strings.Replace(page, "/*__APP_SCRIPT__*/", appJS, 1)
+	return []byte(page)
 
 	// Legacy server-rendered markup is intentionally retained below for one
 	// release so existing plugin builds remain easy to compare and roll back.

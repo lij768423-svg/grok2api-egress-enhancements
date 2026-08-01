@@ -2,562 +2,60 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="light dark">
-  <link rel="icon" href="data:,">
-  <title>Grok2API 出口守护</title>
+  <meta name="referrer" content="no-referrer">
+  <title>Grok2API 管理工作台</title>
   <style>
 /*__HALLMARK_TOKENS__*/
-    * { box-sizing: border-box; border-color: var(--border); }
-    html, body { margin: 0; min-width: 0; overflow-x: clip; background: var(--background); color: var(--foreground); }
-    body { font-family: var(--font-body); font-size: var(--text-md); line-height: 1.5; -webkit-font-smoothing: antialiased; }
-    button, input, select { font: inherit; }
-    button { white-space: nowrap; }
-    [hidden] { display: none !important; }
-    .shell { width: min(100%, 1440px); margin: 0 auto; padding: var(--space-md); }
-    .stack > * + * { margin-top: var(--space-md); }
-    .page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-sm); }
-    .page-head > div:first-child { min-width: 0; }
-    .page-head h1 { min-width: 0; margin: 0; font-family: var(--font-display); font-size: var(--text-xl); font-weight: 650; line-height: 1.2; overflow-wrap: anywhere; }
-    .page-head p { margin: var(--space-3xs) 0 0; color: var(--muted-foreground); font-size: var(--text-xs); }
-    .head-actions, .toolbar, .batch-actions, .row-actions, .modal-actions { display: flex; align-items: center; gap: var(--space-2xs); }
-    .batch-actions { flex-wrap: wrap; }
-    .status-line { display: inline-flex; align-items: center; gap: var(--space-2xs); color: var(--muted-foreground); font-size: var(--text-xs); }
-    .status-dot { width: 0.5rem; height: 0.5rem; border-radius: 50%; background: var(--muted-foreground); }
-    .status-dot.good { background: var(--success); }
-    .status-dot.bad { background: var(--destructive); }
-    .button { min-height: 2.25rem; display: inline-flex; align-items: center; justify-content: center; gap: var(--space-3xs); border: var(--rule-hairline) solid var(--border); border-radius: var(--radius-sm); padding: 0 var(--space-xs); background: var(--secondary); color: var(--secondary-foreground); font-size: var(--text-xs); font-weight: 600; line-height: 1; cursor: pointer; transition: background var(--dur-short) var(--ease-out), color var(--dur-short) var(--ease-out), opacity var(--dur-short) var(--ease-out), transform var(--dur-fast) var(--ease-out); }
-    .button:hover { background: var(--accent); color: var(--accent-foreground); }
-    .button:active { transform: translateY(1px); }
-    .button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
-    .button:disabled { opacity: 0.48; cursor: not-allowed; transform: none; }
-    .button.primary { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); }
-    .button.primary:hover { opacity: 0.9; }
-    .button.ghost { background: transparent; }
-    .button.danger { color: var(--destructive); background: transparent; }
-    .button.danger:hover { background: var(--danger-surface); }
-    .button.icon { width: 2.25rem; padding: 0; font-size: var(--text-lg); font-weight: 400; }
-    .button.busy::before { content: ""; width: 0.75rem; height: 0.75rem; border: 2px solid currentColor; border-right-color: transparent; border-radius: 50%; animation: spin 0.7s linear infinite; }
-    .metrics { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); overflow: hidden; border: var(--rule-hairline) solid var(--border); border-radius: var(--radius-md); background: var(--card); }
-    .metric { min-width: 0; min-height: 5.25rem; padding: var(--space-sm); border-right: var(--rule-hairline) solid var(--border); }
-    .metric:last-child { border-right: 0; }
-    .metric-label { color: var(--muted-foreground); font-size: var(--text-xs); }
-    .metric-value { margin-top: var(--space-3xs); font-size: var(--text-lg); font-weight: 650; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
-    .metric-detail { margin-top: var(--space-3xs); color: var(--muted-foreground); font-size: var(--text-2xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .tone-good { color: var(--success); }
-    .tone-warn { color: var(--warning); }
-    .tone-bad { color: var(--destructive); }
-    .section { border: var(--rule-hairline) solid var(--border); border-radius: var(--radius-md); background: var(--card); overflow: hidden; }
-    .section-head { min-width: 0; display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-sm); padding: var(--space-sm); border-bottom: var(--rule-hairline) solid var(--border); }
-    .section-head h2 { margin: 0; font-size: var(--text-md); font-weight: 650; }
-    .section-head p { margin: var(--space-3xs) 0 0; color: var(--muted-foreground); font-size: var(--text-xs); }
-    .toolbar { flex-wrap: wrap; justify-content: flex-end; }
-    .search { width: min(16rem, 100%); }
-    input, select { min-height: 2.25rem; width: 100%; border: var(--rule-hairline) solid var(--input); border-radius: var(--radius-sm); padding: 0 var(--space-xs); background: var(--background); color: var(--foreground); }
-    input:hover, select:hover { border-color: var(--ring); }
-    input:user-invalid, select:user-invalid { border-color: var(--destructive); background: var(--danger-surface); }
-    input:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; background: var(--muted); }
-    input::placeholder { color: var(--muted-foreground); }
-    input[type="checkbox"] { width: 1rem; min-height: 1rem; accent-color: var(--primary); }
-    .batch-bar { min-height: 3rem; display: flex; align-items: center; justify-content: space-between; gap: var(--space-sm); padding: var(--space-2xs) var(--space-sm); border-bottom: var(--rule-hairline) solid var(--border); background: var(--muted); }
-    .batch-bar span { font-size: var(--text-xs); color: var(--muted-foreground); }
-    .table-wrap { max-width: 100%; overflow: auto; }
-    table { width: 100%; min-width: 1080px; border-collapse: collapse; }
-    th, td { padding: var(--space-xs); border-bottom: var(--rule-hairline) solid var(--border); text-align: left; vertical-align: middle; }
-    th { position: sticky; top: 0; z-index: 1; background: var(--card); color: var(--muted-foreground); font-size: var(--text-xs); font-weight: 550; white-space: nowrap; }
-    td { font-size: var(--text-xs); }
-    tbody tr:last-child td { border-bottom: 0; }
-    tbody tr:hover td { background: color-mix(in oklch, var(--secondary) 55%, transparent); }
-    .check-cell { width: 2.5rem; text-align: center; }
-    .node-name { max-width: 14rem; font-weight: 620; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .subtext { margin-top: var(--space-3xs); color: var(--muted-foreground); font-size: var(--text-2xs); white-space: nowrap; }
-    .numeric { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
-    .badge { display: inline-flex; align-items: center; min-height: 1.35rem; border-radius: 999px; padding: 0 var(--space-2xs); font-size: var(--text-2xs); font-weight: 650; white-space: nowrap; }
-    .badge.good { color: var(--success); background: var(--success-surface); }
-    .badge.warn { color: var(--warning); background: var(--warning-surface); }
-    .badge.bad { color: var(--destructive); background: var(--danger-surface); }
-    .badge.muted { color: var(--muted-foreground); background: var(--secondary); }
-    .row-actions { justify-content: flex-end; }
-    .row-actions .button { min-height: 2rem; padding: 0 var(--space-2xs); }
-    .empty, .loading, .error-state { padding: var(--space-xl) var(--space-sm); text-align: center; color: var(--muted-foreground); font-size: var(--text-xs); }
-    .error-state { color: var(--destructive); }
-    .stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
-    .stat { min-width: 0; min-height: 5.5rem; padding: var(--space-sm); border-right: var(--rule-hairline) solid var(--border); border-bottom: var(--rule-hairline) solid var(--border); }
-    .stat:nth-child(3n) { border-right: 0; }
-    .stat:nth-last-child(-n+3) { border-bottom: 0; }
-    .stat strong { display: block; margin-top: var(--space-3xs); font-size: var(--text-lg); font-variant-numeric: tabular-nums; }
-    .stat small { display: block; margin-top: var(--space-3xs); color: var(--muted-foreground); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .lower-grid { display: grid; grid-template-columns: minmax(0, 3fr) minmax(17rem, 2fr); gap: var(--space-md); }
-    .events { max-height: 24rem; overflow: auto; }
-    .event { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-sm); padding: var(--space-xs) var(--space-sm); border-bottom: var(--rule-hairline) solid var(--border); }
-    .event:last-child { border-bottom: 0; }
-    .event strong { display: block; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .event time, .event small { color: var(--muted-foreground); font-size: var(--text-2xs); white-space: nowrap; }
-    .policy { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-sm); padding: var(--space-sm); }
-    .policy dt { color: var(--muted-foreground); font-size: var(--text-2xs); }
-    .policy dd { margin: var(--space-3xs) 0 0; font-weight: 620; font-variant-numeric: tabular-nums; }
-    .modal-layer { position: fixed; inset: 0; z-index: 20; display: grid; place-items: center; padding: var(--space-sm); background: var(--overlay); }
-    .modal { width: min(34rem, 100%); max-height: calc(100svh - 2rem); overflow: auto; border: var(--rule-hairline) solid var(--border); border-radius: var(--radius-md); background: var(--popover); color: var(--popover-foreground); box-shadow: var(--shadow); }
-    .modal.wide { width: min(42rem, 100%); }
-    .modal-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-sm); padding: var(--space-sm); border-bottom: var(--rule-hairline) solid var(--border); }
-    .modal-head h3 { margin: 0; font-size: var(--text-lg); }
-    .modal-head p { margin: var(--space-3xs) 0 0; color: var(--muted-foreground); font-size: var(--text-xs); }
-    .modal-body { padding: var(--space-sm); }
-    .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-sm); }
-    .field { min-width: 0; }
-    .field.full { grid-column: 1 / -1; }
-    .field label { display: block; margin-bottom: var(--space-3xs); font-size: var(--text-xs); font-weight: 600; }
-    .field .help { min-height: 1lh; margin: var(--space-3xs) 0 0; color: var(--muted-foreground); font-size: var(--text-2xs); }
-    .check-row { min-height: 2.75rem; display: flex; align-items: center; justify-content: space-between; gap: var(--space-sm); padding: 0 var(--space-xs); border-radius: var(--radius-sm); background: var(--muted); }
-    .check-row label { margin: 0; }
-    .modal-actions { justify-content: flex-end; padding: var(--space-sm); border-top: var(--rule-hairline) solid var(--border); }
-    .toast-region { position: fixed; right: var(--space-sm); bottom: var(--space-sm); z-index: 30; width: min(22rem, calc(100% - 2rem)); display: grid; gap: var(--space-2xs); }
-    .toast { padding: var(--space-xs) var(--space-sm); border: var(--rule-hairline) solid var(--border); border-radius: var(--radius-sm); background: var(--popover); color: var(--popover-foreground); box-shadow: var(--shadow); font-size: var(--text-xs); animation: toast-in var(--dur-medium) var(--ease-out); }
-    .toast.success { border-color: var(--success); }
-    .toast.error { border-color: var(--destructive); }
-    @keyframes spin { to { transform: rotate(360deg); } }
-    @keyframes toast-in { from { opacity: 0; transform: translateY(0.5rem); } to { opacity: 1; transform: translateY(0); } }
-    @media (max-width: 900px) {
-      .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .metric:nth-child(2) { border-right: 0; }
-      .metric:nth-child(-n+2) { border-bottom: var(--rule-hairline) solid var(--border); }
-      .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-      .stat:nth-child(3n) { border-right: var(--rule-hairline) solid var(--border); }
-      .stat:nth-child(2n) { border-right: 0; }
-      .stat:nth-last-child(-n+3) { border-bottom: var(--rule-hairline) solid var(--border); }
-      .stat:nth-last-child(-n+2) { border-bottom: 0; }
-      .lower-grid { grid-template-columns: minmax(0, 1fr); }
-    }
-    @media (max-width: 600px) {
-      .shell { padding: var(--space-sm); }
-      .page-head, .section-head, .batch-bar { align-items: stretch; flex-direction: column; }
-      .head-actions, .toolbar, .batch-actions { width: 100%; }
-      .toolbar { justify-content: flex-start; }
-      .search { width: 100%; }
-      .metrics, .stats, .form-grid { grid-template-columns: minmax(0, 1fr); }
-      .metric { border-right: 0; border-bottom: var(--rule-hairline) solid var(--border); }
-      .metric:nth-child(2) { border-bottom: var(--rule-hairline) solid var(--border); }
-      .metric:last-child { border-bottom: 0; }
-      .stat, .stat:nth-child(2n), .stat:nth-child(3n) { border-right: 0; border-bottom: var(--rule-hairline) solid var(--border); }
-      .stat:last-child { border-bottom: 0; }
-      .field.full { grid-column: auto; }
-      .modal-actions .button { flex: 1; }
-    }
-    @media (prefers-reduced-motion: reduce) {
-      *, *::before, *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; }
-    }
+/*__APP_STYLES__*/
   </style>
 </head>
 <body>
-  <main class="shell stack">
-    <header class="page-head">
-      <div>
-        <h1>Grok2API 出口守护</h1>
-        <p>统一管理出口节点、质量检测与隔离策略</p>
+  <div class="app-shell">
+    <aside class="sidebar" aria-label="Grok2API 管理导航">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">G</span>
+        <span><strong>Grok2API</strong><small>CPA 管理工作台</small></span>
       </div>
-      <div class="head-actions">
-        <span class="status-line"><span id="service-dot" class="status-dot"></span><span id="service-text">正在连接</span></span>
-        <button id="theme-button" class="button icon ghost" type="button" title="切换深浅色" aria-label="切换深浅色">◐</button>
-        <button id="refresh-button" class="button" type="button">刷新</button>
+      <nav class="nav-list">
+        <button type="button" class="nav-item" data-view="dashboard"><span class="nav-glyph">01</span><span>概览</span></button>
+        <button type="button" class="nav-item" data-view="accounts"><span class="nav-glyph">02</span><span>账号</span></button>
+        <button type="button" class="nav-item" data-view="egress"><span class="nav-glyph">03</span><span>出口守护</span></button>
+        <button type="button" class="nav-item" data-view="models"><span class="nav-glyph">04</span><span>模型</span></button>
+        <button type="button" class="nav-item" data-view="keys"><span class="nav-glyph">05</span><span>Client Key</span></button>
+        <button type="button" class="nav-item" data-view="audits"><span class="nav-glyph">06</span><span>请求审计</span></button>
+        <button type="button" class="nav-item" data-view="settings"><span class="nav-glyph">07</span><span>设置</span></button>
+      </nav>
+      <div class="sidebar-foot">
+        <span class="status-dot" id="service-dot"></span>
+        <span id="service-text">正在连接</span>
       </div>
-    </header>
+    </aside>
 
-    <section class="metrics" aria-label="守护概览">
-      <div class="metric"><div class="metric-label">守护进程</div><div id="metric-service" class="metric-value">-</div><div id="metric-updated" class="metric-detail">等待状态</div></div>
-      <div class="metric"><div class="metric-label">运行模式</div><div id="metric-mode" class="metric-value">-</div><div id="metric-model" class="metric-detail">-</div></div>
-      <div class="metric"><div class="metric-label">可调度节点</div><div id="metric-enabled" class="metric-value">-</div><div id="metric-total" class="metric-detail">-</div></div>
-      <div class="metric"><div class="metric-label">已隔离</div><div id="metric-quarantined" class="metric-value">-</div><div id="metric-next" class="metric-detail">严格质量恢复</div></div>
-    </section>
-
-    <section class="section" aria-labelledby="nodes-title">
-      <div class="section-head">
-        <div><h2 id="nodes-title">出口节点</h2><p>代理凭据仅在保存时提交，页面不会读取或回显</p></div>
-        <div class="toolbar">
-          <input id="node-search" class="search" type="search" placeholder="搜索节点、IP 或 ID" aria-label="搜索节点">
-          <button id="add-node" class="button primary" type="button">添加节点</button>
+    <main class="main-area">
+      <header class="topbar">
+        <div class="topbar-title">
+          <button id="menu-button" class="button icon ghost mobile-only" type="button" title="打开导航" aria-label="打开导航">☰</button>
+          <div><h1 id="page-title">概览</h1><p id="page-subtitle">Grok2API 运行状态与资源概览</p></div>
         </div>
-      </div>
-      <div id="batch-bar" class="batch-bar" hidden>
-        <span id="batch-count">已选择 0 个节点</span>
-        <div class="batch-actions">
-          <button class="button" type="button" data-batch="enable">启用</button>
-          <button class="button" type="button" data-batch="disable">停用</button>
-          <button class="button" type="button" data-batch="test">检测连通性</button>
-          <button class="button danger" type="button" data-batch="delete">删除</button>
+        <div class="topbar-actions">
+          <button id="theme-button" class="button icon ghost" type="button" title="切换深浅色" aria-label="切换深浅色">◐</button>
+          <button id="refresh-button" class="button" type="button">刷新</button>
         </div>
-      </div>
-      <div class="table-wrap">
-        <table>
-          <thead><tr>
-            <th class="check-cell"><input id="select-all" type="checkbox" aria-label="选择所有节点"></th>
-            <th>节点</th><th>状态</th><th>出口 IP</th><th class="numeric">输出 Token/s</th><th class="numeric">首字</th><th>账号</th><th>最近观测</th><th style="text-align:right">操作</th>
-          </tr></thead>
-          <tbody id="nodes-body"><tr><td colspan="9" class="loading">正在加载节点</td></tr></tbody>
-        </table>
-      </div>
-    </section>
-
-    <section class="section" aria-labelledby="statistics-title">
-      <div class="section-head"><div><h2 id="statistics-title">检测统计</h2><p id="statistics-since">统计进程启动后的自动检测</p></div></div>
-      <div id="statistics-grid" class="stats"></div>
-    </section>
-
-    <div class="lower-grid">
-      <section class="section" aria-labelledby="events-title">
-        <div class="section-head"><div><h2 id="events-title">最近事件</h2><p>隔离、恢复和质量检测结果</p></div></div>
-        <div id="events-list" class="events"><div class="loading">正在加载事件</div></div>
-      </section>
-      <section class="section" aria-labelledby="policy-title">
-        <div class="section-head"><div><h2 id="policy-title">守护策略</h2><p>修改后由 sidecar 自动重载</p></div><button id="edit-policy" class="button" type="button">编辑</button></div>
-        <dl id="policy-view" class="policy"></dl>
-      </section>
-    </div>
-  </main>
-
-  <div id="node-modal" class="modal-layer" hidden>
-    <section class="modal wide" role="dialog" aria-modal="true" aria-labelledby="node-modal-title">
-      <div class="modal-head"><div><h3 id="node-modal-title">添加节点</h3><p>仅支持 grok_build 出口，保存后立即进入节点列表</p></div><button class="button icon ghost" type="button" data-close="node-modal" aria-label="关闭">×</button></div>
-      <form id="node-form">
-        <div class="modal-body form-grid">
-          <div class="field full check-row"><label for="node-enabled">启用节点</label><input id="node-enabled" type="checkbox" checked></div>
-          <div class="field"><label for="node-name">名称</label><input id="node-name" required maxlength="120" autocomplete="off" placeholder="例如 grok-build-sticky-04"></div>
-          <div class="field"><label for="node-capacity">账号容量</label><input id="node-capacity" type="number" min="0" max="100000" value="0"><p class="help">0 表示不限制</p></div>
-          <div class="field full"><label for="node-proxy">代理 URL</label><input id="node-proxy" type="password" autocomplete="new-password" placeholder="socks5h://user:pass@host:port"><p id="node-proxy-help" class="help">创建节点时必填；编辑时留空表示保留现有代理</p></div>
-          <div class="field full check-row"><div><label for="node-pool">代理池模式</label><p class="help">动态轮换代理开启；静态或固定代理关闭</p></div><input id="node-pool" type="checkbox"></div>
-        </div>
-        <div class="modal-actions"><button class="button" type="button" data-close="node-modal">取消</button><button id="save-node" class="button primary" type="submit">保存</button></div>
-      </form>
-    </section>
+      </header>
+      <div id="view-root" class="view-root" aria-live="polite"><div class="loading-panel">正在加载</div></div>
+    </main>
   </div>
 
-  <div id="policy-modal" class="modal-layer" hidden>
-    <section class="modal wide" role="dialog" aria-modal="true" aria-labelledby="policy-modal-title">
-      <div class="modal-head"><div><h3 id="policy-modal-title">守护策略</h3><p>严格模式下只有真实模型质量检测健康才会恢复节点</p></div><button class="button icon ghost" type="button" data-close="policy-modal" aria-label="关闭">×</button></div>
-      <form id="policy-form">
-        <div class="modal-body form-grid">
-          <div class="field"><label for="policy-mode">模式</label><select id="policy-mode"><option value="hybrid">混合</option><option value="passive">被动</option><option value="active">主动</option></select></div>
-          <div class="field"><label for="policy-active">主动检测间隔（秒）</label><input id="policy-active" type="number" min="60" max="86400"></div>
-          <div class="field"><label for="policy-passive">审计轮询间隔（秒）</label><input id="policy-passive" type="number" min="1" max="300"></div>
-          <div class="field"><label for="policy-quarantine">隔离复测间隔（秒）</label><input id="policy-quarantine" type="number" min="30" max="86400"></div>
-          <div class="field"><label for="policy-soft">软阈值 Token/s</label><input id="policy-soft" type="number" min="1" max="9999" step="1"></div>
-          <div class="field"><label for="policy-hard">硬阈值 Token/s</label><input id="policy-hard" type="number" min="2" max="10000" step="1"></div>
-          <div class="field"><label for="policy-soft-count">连续软异常次数</label><input id="policy-soft-count" type="number" min="1" max="20"></div>
-          <div class="field"><label for="policy-error-count">连续错误次数</label><input id="policy-error-count" type="number" min="1" max="20"></div>
-          <div class="field full"><label for="policy-min-healthy">最低健康节点数</label><input id="policy-min-healthy" type="number" min="1" max="1000"></div>
-        </div>
-        <div class="modal-actions"><button class="button" type="button" data-close="policy-modal">取消</button><button id="save-policy" class="button primary" type="submit">保存策略</button></div>
-      </form>
-    </section>
-  </div>
-
-  <div id="confirm-modal" class="modal-layer" hidden>
-    <section class="modal" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title">
-      <div class="modal-head"><div><h3 id="confirm-title">确认操作</h3><p id="confirm-message"></p></div></div>
-      <div class="modal-actions"><button class="button" type="button" data-close="confirm-modal">取消</button><button id="confirm-action" class="button danger" type="button">确认</button></div>
-    </section>
-  </div>
-
+  <div id="sidebar-scrim" class="sidebar-scrim" hidden></div>
+  <dialog id="form-dialog" class="dialog"><form method="dialog"><header><div><h2 id="form-dialog-title">编辑</h2><p id="form-dialog-description"></p></div><button class="button icon ghost" value="cancel" aria-label="关闭">×</button></header><div id="form-dialog-body" class="dialog-body"></div><footer><button class="button" value="cancel">取消</button><button id="form-dialog-submit" class="button primary" value="default">保存</button></footer></form></dialog>
+  <dialog id="confirm-dialog" class="dialog compact"><form method="dialog"><header><div><h2 id="confirm-dialog-title">确认操作</h2><p id="confirm-dialog-description"></p></div></header><div id="confirm-dialog-body" class="dialog-body"></div><footer><button class="button" value="cancel">取消</button><button id="confirm-dialog-submit" class="button danger" value="default">确认</button></footer></form></dialog>
+  <dialog id="detail-dialog" class="dialog wide"><form method="dialog"><header><div><h2 id="detail-dialog-title">详情</h2><p id="detail-dialog-description"></p></div><button class="button icon ghost" value="cancel" aria-label="关闭">×</button></header><div id="detail-dialog-body" class="dialog-body"></div><footer><button class="button" value="cancel">关闭</button></footer></form></dialog>
   <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="true"></div>
 
   <script>
-  (() => {
-    'use strict';
-    const PLUGIN_BASE = '/v0/resource/plugins/grok2api-egress';
-    const MANAGEMENT_API = '/v0/management/grok2api-egress/api';
-    const state = { status: null, nodes: [], selected: new Set(), search: '', editing: null, confirm: null, loading: false, autoTimer: 0 };
-    const $ = (id) => document.getElementById(id);
-    const esc = (value) => String(value ?? '').replace(/[&<>'"]/g, (char) => ({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[char]));
-    const number = (value) => new Intl.NumberFormat('zh-CN').format(Number(value || 0));
-    const modeName = (mode) => ({active:'主动', passive:'被动', hybrid:'混合'})[mode] || '-';
-    const time = (value, epoch = false) => {
-      if (!value) return '-';
-      const date = epoch ? new Date(Number(value) * 1000) : new Date(value);
-      return Number.isNaN(date.getTime()) ? '-' : new Intl.DateTimeFormat('zh-CN', {month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',second:'2-digit'}).format(date);
-    };
-    const relative = (epoch) => {
-      if (!epoch) return '-';
-      const sec = Math.max(0, Math.round(Date.now() / 1000 - Number(epoch)));
-      if (sec < 60) return sec + ' 秒前';
-      if (sec < 3600) return Math.floor(sec / 60) + ' 分钟前';
-      return Math.floor(sec / 3600) + ' 小时前';
-    };
-    function managementKey() {
-      try {
-        let raw = localStorage.getItem('managementKey');
-        if (!raw) return '';
-        if (raw.startsWith('enc::v1::')) {
-          const encoded = atob(raw.slice(9));
-          const value = Uint8Array.from(encoded, (char) => char.charCodeAt(0));
-          const key = new TextEncoder().encode('cli-proxy-api-webui::secure-storage|' + location.host + '|' + navigator.userAgent);
-          for (let index = 0; index < value.length; index += 1) value[index] ^= key[index % key.length];
-          raw = new TextDecoder().decode(value);
-        }
-        const decoded = JSON.parse(raw);
-        return typeof decoded === 'string' ? decoded : '';
-      } catch (_) { return ''; }
-    }
-    async function api(path, options = {}) {
-      const key = managementKey();
-      if (!key) throw new Error('CPA 管理登录状态不可用，请重新登录管理面板');
-      const response = await fetch(MANAGEMENT_API, {
-        method: 'POST',
-        headers: {'Content-Type':'application/json','Accept':'application/json','Authorization':'Bearer ' + key,'X-Grok2API-Egress-UI':'1'},
-        body: JSON.stringify({method: options.method || 'GET', path, body: options.body}),
-        cache: 'no-store'
-      });
-      const raw = await response.text();
-      let payload = {};
-      try { payload = raw ? JSON.parse(raw) : {}; } catch (_) { throw new Error('服务返回了无效数据'); }
-      if (!response.ok || payload.error) throw new Error(payload?.error?.message || ('请求失败 (HTTP ' + response.status + ')'));
-      return payload.data ?? payload;
-    }
-    function toast(message, kind = 'success') {
-      const node = document.createElement('div');
-      node.className = 'toast ' + kind;
-      node.textContent = message;
-      $('toast-region').appendChild(node);
-      window.setTimeout(() => node.remove(), 3200);
-    }
-    function busy(button, value) {
-      if (!button) return;
-      button.disabled = value;
-      button.classList.toggle('busy', value);
-    }
-    function setService(ok, text) {
-      $('service-dot').className = 'status-dot ' + (ok ? 'good' : 'bad');
-      $('service-text').textContent = text;
-    }
-    async function load(silent = false) {
-      if (state.loading) return;
-      state.loading = true;
-      busy($('refresh-button'), true);
-      try {
-        const [status, list] = await Promise.all([
-          api('/quality-guard'),
-          api('/nodes?page=1&pageSize=2000&scope=grok_build')
-        ]);
-        state.status = status;
-        state.nodes = Array.isArray(list.items) ? list.items : [];
-        state.selected = new Set([...state.selected].filter((id) => state.nodes.some((node) => node.id === id)));
-        render();
-        setService(true, '已连接');
-      } catch (error) {
-        setService(false, '连接失败');
-        $('nodes-body').innerHTML = '<tr><td colspan="9" class="error-state">' + esc(error.message) + '</td></tr>';
-        if (!silent) toast(error.message, 'error');
-      } finally {
-        state.loading = false;
-        busy($('refresh-button'), false);
-      }
-    }
-    function render() {
-      renderMetrics(); renderNodes(); renderStatistics(); renderEvents(); renderPolicy();
-    }
-    function renderMetrics() {
-      const status = state.status || {};
-      const guardNodes = status.nodes || {};
-      const fresh = status.available && status.updatedAt && (Date.now() / 1000 - status.updatedAt < 30);
-      const enabled = state.nodes.filter((node) => node.enabled).length;
-      const quarantined = state.nodes.filter((node) => guardNodes[node.id]?.disabled_by_guard).length;
-      $('metric-service').textContent = fresh ? '运行中' : status.available ? '状态滞后' : '不可用';
-      $('metric-service').className = 'metric-value ' + (fresh ? 'tone-good' : 'tone-bad');
-      $('metric-updated').textContent = status.updatedAt ? '更新于 ' + relative(status.updatedAt) : '没有状态数据';
-      $('metric-mode').textContent = modeName(status.config?.mode);
-      $('metric-model').textContent = status.config?.model || '-';
-      $('metric-enabled').textContent = enabled + ' / ' + state.nodes.length;
-      $('metric-total').textContent = '已启用 / 全部 grok_build 节点';
-      $('metric-quarantined').textContent = String(quarantined);
-      $('metric-quarantined').className = 'metric-value ' + (quarantined ? 'tone-bad' : 'tone-good');
-      $('metric-next').textContent = quarantined ? '等待真实模型复测' : '当前无隔离节点';
-    }
-    function filteredNodes() {
-      const query = state.search.trim().toLowerCase();
-      if (!query) return state.nodes;
-      return state.nodes.filter((node) => [node.id,node.name,node.exitIp].some((value) => String(value || '').toLowerCase().includes(query)));
-    }
-    function nodeGuard(node) { return state.status?.nodes?.[node.id] || {}; }
-    function nodeBadge(node, guard) {
-      if (guard.disabled_by_guard) return '<span class="badge bad">已隔离</span>';
-      if (!node.enabled) return '<span class="badge muted">已停用</span>';
-      if (guard.error_strikes) return '<span class="badge warn">检测失败</span>';
-      if (guard.last_classification === 'hard' || guard.last_classification === 'soft') return '<span class="badge warn">可疑</span>';
-      if (guard.last_classification === 'healthy') return '<span class="badge good">健康</span>';
-      return '<span class="badge muted">待检测</span>';
-    }
-    function renderNodes() {
-      const nodes = filteredNodes();
-      $('batch-bar').hidden = state.selected.size === 0;
-      $('batch-count').textContent = '已选择 ' + state.selected.size + ' 个节点';
-      $('select-all').checked = nodes.length > 0 && nodes.every((node) => state.selected.has(node.id));
-      $('select-all').indeterminate = !($('select-all').checked) && nodes.some((node) => state.selected.has(node.id));
-      if (!nodes.length) {
-        $('nodes-body').innerHTML = '<tr><td colspan="9" class="empty">' + (state.search ? '没有匹配的节点' : '暂无出口节点') + '</td></tr>';
-        return;
-      }
-      $('nodes-body').innerHTML = nodes.map((node) => {
-        const guard = nodeGuard(node);
-        const cls = guard.last_classification || '';
-        const tpsClass = cls === 'hard' ? 'tone-bad' : cls === 'soft' ? 'tone-warn' : '';
-        const observed = guard.last_observed_at || guard.last_probe_at;
-        return '<tr data-id="' + esc(node.id) + '">' +
-          '<td class="check-cell"><input type="checkbox" data-action="select" ' + (state.selected.has(node.id) ? 'checked' : '') + ' aria-label="选择 ' + esc(node.name) + '"></td>' +
-          '<td><div class="node-name" title="' + esc(node.name) + '">' + esc(node.name) + '</div><div class="subtext">ID ' + esc(node.id) + ' · ' + (node.proxyPool ? '代理池' : '固定代理') + '</div></td>' +
-          '<td>' + nodeBadge(node, guard) + '<div class="subtext">' + esc(guard.last_reason || node.probeStatus || '-') + '</div></td>' +
-          '<td><div>' + esc(node.exitIp || '-') + '</div><div class="subtext">' + esc(node.probeStatus || 'unknown') + ' · ' + number(node.probeLatencyMs) + ' ms</div></td>' +
-          '<td class="numeric ' + tpsClass + '">' + (observed ? Number(guard.last_output_tps || 0).toFixed(1) : '-') + '</td>' +
-          '<td class="numeric">' + (guard.last_first_token_ms ? number(guard.last_first_token_ms) + ' ms' : '-') + '</td>' +
-          '<td><div>' + number(node.assignedAccountCount) + ' / ' + (node.accountCapacity || '∞') + '</div><div class="subtext">已绑定 / 容量</div></td>' +
-          '<td title="' + esc(time(observed, true)) + '">' + relative(observed) + '<div class="subtext">' + esc(guard.last_source || '-') + '</div></td>' +
-          '<td><div class="row-actions">' +
-            '<button class="button" type="button" data-action="quality" title="真实模型质量检测">质量检测</button>' +
-            '<button class="button" type="button" data-action="connectivity" title="检查代理连通性">连通性</button>' +
-            '<button class="button ghost" type="button" data-action="edit">编辑</button>' +
-            '<button class="button ghost" type="button" data-action="toggle">' + (node.enabled ? '停用' : '启用') + '</button>' +
-            '<button class="button danger" type="button" data-action="delete">删除</button>' +
-          '</div></td></tr>';
-      }).join('');
-    }
-    function renderStatistics() {
-      const stats = state.status?.statistics || {started_at:0,active:{total:0,healthy:0,soft:0,hard:0,errors:0,output_tokens:0},passive:{total:0,healthy:0,soft:0,hard:0,errors:0,output_tokens:0},actions:{quarantined:0,restored:0,suppressed:0}};
-      const anomalies = stats.active.soft + stats.active.hard + stats.passive.soft + stats.passive.hard;
-      const items = [
-        ['自动检测', stats.active.total + stats.passive.total, '主动 + 被动'],
-        ['主动探测', stats.active.total, '健康 ' + number(stats.active.healthy) + ' · 错误 ' + number(stats.active.errors)],
-        ['被动审计', stats.passive.total, '健康 ' + number(stats.passive.healthy)],
-        ['探测 Token', stats.active.output_tokens, '包含推理 Token'],
-        ['异常命中', anomalies, '软 ' + number(stats.active.soft + stats.passive.soft) + ' · 硬 ' + number(stats.active.hard + stats.passive.hard)],
-        ['隔离操作', stats.actions.quarantined, '恢复 ' + number(stats.actions.restored) + ' · 抑制 ' + number(stats.actions.suppressed)]
-      ];
-      $('statistics-since').textContent = stats.started_at ? '统计开始于 ' + time(stats.started_at, true) : '统计进程启动后的自动检测';
-      $('statistics-grid').innerHTML = items.map((item) => '<div class="stat"><span class="metric-label">' + item[0] + '</span><strong>' + number(item[1]) + '</strong><small title="' + esc(item[2]) + '">' + esc(item[2]) + '</small></div>').join('');
-    }
-    function renderEvents() {
-      const events = state.status?.recentEvents || [];
-      if (!events.length) { $('events-list').innerHTML = '<div class="empty">暂无守护事件</div>'; return; }
-      const names = {node_quarantined:'节点已隔离',node_restored:'节点已恢复',quality_probe_completed:'质量检测完成',node_rotated:'出口 IP 已轮换',quarantine_suppressed:'隔离已抑制'};
-      $('events-list').innerHTML = events.slice().reverse().map((event) => '<div class="event"><div><strong>' + esc(names[event.event] || event.event || '守护事件') + ' · ' + esc(event.node_name || ('节点 ' + event.node_id)) + '</strong><small>' + esc(event.reason || event.classification || '-') + (event.output_tps ? ' · ' + Number(event.output_tps).toFixed(1) + ' Token/s' : '') + '</small></div><time>' + relative(event.ts) + '</time></div>').join('');
-    }
-    function renderPolicy() {
-      const cfg = state.status?.config;
-      $('edit-policy').disabled = !cfg || state.status?.editable === false;
-      if (!cfg) { $('policy-view').innerHTML = '<div class="empty">策略状态不可用</div>'; return; }
-      const values = [['模式',modeName(cfg.mode)],['主动间隔',cfg.active_interval_seconds + ' 秒'],['被动轮询',cfg.passive_poll_seconds + ' 秒'],['软 / 硬阈值',cfg.soft_tps + ' / ' + cfg.hard_tps],['连续异常',cfg.consecutive_soft + ' / ' + cfg.consecutive_errors],['隔离复测',cfg.quarantine_seconds + ' 秒'],['最低健康节点',cfg.min_healthy_nodes],['模型',cfg.model]];
-      $('policy-view').innerHTML = values.map((value) => '<div><dt>' + value[0] + '</dt><dd>' + esc(value[1]) + '</dd></div>').join('');
-    }
-    function openModal(id) { $(id).hidden = false; document.body.style.overflow = 'hidden'; $(id).querySelector('input,select,button')?.focus(); }
-    function closeModal(id) { $(id).hidden = true; document.body.style.overflow = ''; }
-    function openNode(node = null) {
-      state.editing = node;
-      $('node-modal-title').textContent = node ? '编辑节点' : '添加节点';
-      $('node-name').value = node?.name || '';
-      $('node-capacity').value = node?.accountCapacity || 0;
-      $('node-enabled').checked = node ? Boolean(node.enabled) : true;
-      $('node-pool').checked = Boolean(node?.proxyPool);
-      $('node-proxy').value = '';
-      $('node-proxy').required = !node;
-      openModal('node-modal');
-    }
-    function openPolicy() {
-      const cfg = state.status?.config;
-      if (!cfg) return;
-      $('policy-mode').value = cfg.mode; $('policy-active').value = cfg.active_interval_seconds; $('policy-passive').value = cfg.passive_poll_seconds;
-      $('policy-quarantine').value = cfg.quarantine_seconds; $('policy-soft').value = cfg.soft_tps; $('policy-hard').value = cfg.hard_tps;
-      $('policy-soft-count').value = cfg.consecutive_soft; $('policy-error-count').value = cfg.consecutive_errors; $('policy-min-healthy').value = cfg.min_healthy_nodes;
-      openModal('policy-modal');
-    }
-    function confirmAction(title, message, action) {
-      $('confirm-title').textContent = title; $('confirm-message').textContent = message; state.confirm = action; openModal('confirm-modal');
-    }
-    async function mutate(button, task, success) {
-      busy(button, true);
-      try { await task(); toast(success); closeModal('confirm-modal'); await load(true); }
-      catch (error) { toast(error.message, 'error'); }
-      finally { busy(button, false); }
-    }
-    async function toggleNodes(ids, enabled, button) {
-      await mutate(button, () => api('/nodes/batch', {method:'PATCH', body:{ids,enabled}}), (enabled ? '已启用 ' : '已停用 ') + ids.length + ' 个节点');
-      state.selected.clear();
-    }
-    async function deleteNodes(ids, button) {
-      await mutate(button, () => api('/nodes', {method:'DELETE', body:{ids}}), '已删除 ' + ids.length + ' 个节点');
-      state.selected.clear();
-    }
-    async function testConnectivity(ids, button) {
-      await mutate(button, () => api('/nodes/test', {method:'POST', body:{ids}}), '连通性检测完成');
-    }
-    async function qualityTest(node, button) {
-      busy(button, true);
-      try {
-        const result = await api('/quality-guard/nodes/' + encodeURIComponent(node.id) + '/test', {method:'POST'});
-        toast(node.name + '：' + Number(result.outputTokensPerSecond || 0).toFixed(1) + ' Token/s');
-        await load(true);
-      } catch (error) { toast(error.message, 'error'); }
-      finally { busy(button, false); }
-    }
-    $('refresh-button').addEventListener('click', () => load());
-    $('theme-button').addEventListener('click', () => {
-      const dark = document.documentElement.dataset.theme === 'dark';
-      document.documentElement.dataset.theme = dark ? 'light' : 'dark';
-      localStorage.setItem('grok2api-egress-theme', dark ? 'light' : 'dark');
-    });
-    $('node-search').addEventListener('input', (event) => { state.search = event.target.value; renderNodes(); });
-    $('add-node').addEventListener('click', () => openNode());
-    $('edit-policy').addEventListener('click', openPolicy);
-    $('select-all').addEventListener('change', (event) => {
-      filteredNodes().forEach((node) => event.target.checked ? state.selected.add(node.id) : state.selected.delete(node.id)); renderNodes();
-    });
-    $('nodes-body').addEventListener('click', (event) => {
-      const row = event.target.closest('tr[data-id]'); const control = event.target.closest('[data-action]');
-      if (!row || !control) return;
-      const node = state.nodes.find((item) => item.id === row.dataset.id); if (!node) return;
-      const action = control.dataset.action;
-      if (action === 'select') { control.checked ? state.selected.add(node.id) : state.selected.delete(node.id); renderNodes(); }
-      if (action === 'edit') openNode(node);
-      if (action === 'toggle') toggleNodes([node.id], !node.enabled, control);
-      if (action === 'connectivity') testConnectivity([node.id], control);
-      if (action === 'quality') qualityTest(node, control);
-      if (action === 'delete') confirmAction('删除节点', '将删除“' + node.name + '”。已绑定账号会失去该出口分配。', (button) => deleteNodes([node.id], button));
-    });
-    $('batch-bar').addEventListener('click', (event) => {
-      const button = event.target.closest('[data-batch]'); if (!button) return;
-      const ids = [...state.selected]; if (!ids.length) return;
-      if (button.dataset.batch === 'enable') toggleNodes(ids, true, button);
-      if (button.dataset.batch === 'disable') toggleNodes(ids, false, button);
-      if (button.dataset.batch === 'test') testConnectivity(ids, button);
-      if (button.dataset.batch === 'delete') confirmAction('批量删除节点', '将删除选中的 ' + ids.length + ' 个节点，此操作不可撤销。', (confirmButton) => deleteNodes(ids, confirmButton));
-    });
-    $('node-form').addEventListener('submit', async (event) => {
-      event.preventDefault();
-      const button = $('save-node'); const proxyURL = $('node-proxy').value.trim();
-      const body = {name:$('node-name').value.trim(),scope:'grok_build',enabled:$('node-enabled').checked,proxyPool:$('node-pool').checked,accountCapacity:Number($('node-capacity').value || 0),userAgent:'',cloudflareCookies:''};
-      if (proxyURL) body.proxyURL = proxyURL;
-      if (!body.name || (!state.editing && !proxyURL)) { toast('请填写名称和代理 URL', 'error'); return; }
-      busy(button, true);
-      try {
-        const path = state.editing ? '/nodes/' + encodeURIComponent(state.editing.id) : '/nodes';
-        await api(path, {method: state.editing ? 'PUT' : 'POST', body});
-        toast(state.editing ? '节点已更新' : '节点已添加'); closeModal('node-modal'); await load(true);
-      } catch (error) { toast(error.message, 'error'); }
-      finally { busy(button, false); }
-    });
-    $('policy-form').addEventListener('submit', async (event) => {
-      event.preventDefault();
-      const button = $('save-policy');
-      const body = {mode:$('policy-mode').value,activeIntervalSeconds:Number($('policy-active').value),passivePollSeconds:Number($('policy-passive').value),softTPS:Number($('policy-soft').value),hardTPS:Number($('policy-hard').value),consecutiveSoft:Number($('policy-soft-count').value),consecutiveErrors:Number($('policy-error-count').value),quarantineSeconds:Number($('policy-quarantine').value),minHealthyNodes:Number($('policy-min-healthy').value)};
-      if (body.softTPS >= body.hardTPS) { toast('软阈值必须低于硬阈值', 'error'); return; }
-      busy(button, true);
-      try { await api('/quality-guard/config', {method:'PUT', body}); toast('守护策略已保存'); closeModal('policy-modal'); await load(true); }
-      catch (error) { toast(error.message, 'error'); }
-      finally { busy(button, false); }
-    });
-    document.addEventListener('click', (event) => { const close = event.target.closest('[data-close]'); if (close) closeModal(close.dataset.close); });
-    $('confirm-action').addEventListener('click', () => { if (state.confirm) state.confirm($('confirm-action')); });
-    document.addEventListener('keydown', (event) => { if (event.key === 'Escape') ['node-modal','policy-modal','confirm-modal'].forEach((id) => { if (!$(id).hidden) closeModal(id); }); });
-    const savedTheme = localStorage.getItem('grok2api-egress-theme');
-    document.documentElement.dataset.theme = savedTheme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
-    load();
-    state.autoTimer = window.setInterval(() => { if (document.visibilityState === 'visible') load(true); }, 15000);
-  })();
+/*__APP_SCRIPT__*/
   </script>
 </body>
 </html>
