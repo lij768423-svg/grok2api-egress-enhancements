@@ -7,6 +7,7 @@ Current baseline:
 - Upstream release: `v3.0.11`
 - Upstream commit: `090104504b403d65675a01dab9c92b3a235ee832`
 - Patch commit: `690a641deb06c5c1a73983677f6b454557727113`
+- Follow-up fix patch: `patches/0002-fix-quality-guard-empty-node-selection.patch`
 - Upstream draft PR: [chenyme/grok2api#837](https://github.com/chenyme/grok2api/pull/837)
 - Runnable fork: [lij768423-svg/grok2api](https://github.com/lij768423-svg/grok2api/tree/main)
 
@@ -26,6 +27,7 @@ Current baseline:
 - Passive audits use the grok2api panel formula `output tokens / (duration - first token)`; output tokens include reasoning tokens.
 - **Passive hard-threshold hits quarantine immediately**. Soft hits still trigger a fixed-prompt active confirmation and require consecutive strikes.
 - Active soft and hard thresholds, consecutive probe-error handling, minimum healthy-node protection, quarantine, and recovery.
+- An empty `QUALITY_GUARD_NODE_IDS` monitors all enabled `grok_build` nodes with configured proxies.
 - Admin UI, manual diagnostics, hot-reloadable policy, and persistent statistics.
 - Python sidecar, Docker Compose and systemd examples, security notes, and bilingual documentation.
 
@@ -39,7 +41,9 @@ From a clean grok2api checkout:
 ```sh
 git fetch --tags origin
 git checkout -b egress-enhancements v3.0.11
-git am --3way /path/to/grok2api-egress-enhancements/patches/0001-feat-add-egress-recovery-and-quality-guard.patch
+git am --3way \
+  /path/to/grok2api-egress-enhancements/patches/0001-feat-add-egress-recovery-and-quality-guard.patch \
+  /path/to/grok2api-egress-enhancements/patches/0002-fix-quality-guard-empty-node-selection.patch
 ```
 
 For newer upstream versions, follow [AI_MERGE_GUIDE.md](./docs/AI_MERGE_GUIDE.md) and resolve conflicts according to the documented invariants instead of replacing newer files wholesale.

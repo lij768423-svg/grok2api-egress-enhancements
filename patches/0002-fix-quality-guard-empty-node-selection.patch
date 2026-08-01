@@ -1,0 +1,51 @@
+From 9277e3a88c9fd2cdc693b3c458eefffccacec158 Mon Sep 17 00:00:00 2001
+From: xiehs211 <75530936+xiehs211@users.noreply.github.com>
+Date: Sat, 1 Aug 2026 15:09:52 +0000
+Subject: [PATCH] fix: honor empty quality guard node selection
+
+---
+ frontend/src/features/quality-guard/quality-guard-page.tsx | 3 ++-
+ tools/egress-quality-guard/compose.override.example.yml    | 6 ++++++
+ 2 files changed, 8 insertions(+), 1 deletion(-)
+
+diff --git a/frontend/src/features/quality-guard/quality-guard-page.tsx b/frontend/src/features/quality-guard/quality-guard-page.tsx
+index b404e72..5e7c2af 100644
+--- a/frontend/src/features/quality-guard/quality-guard-page.tsx
++++ b/frontend/src/features/quality-guard/quality-guard-page.tsx
+@@ -47,7 +47,8 @@ export function QualityGuardPage() {
+ 
+   const status = statusQuery.data;
+   const configuredNodeIDs = new Set(status?.config?.node_ids ?? []);
+-  const nodes = (nodesQuery.data?.items ?? []).filter((node) => !status?.config || configuredNodeIDs.has(node.id));
++  const hasNodeFilter = configuredNodeIDs.size > 0;
++  const nodes = (nodesQuery.data?.items ?? []).filter((node) => !hasNodeFilter || configuredNodeIDs.has(node.id));
+   const fresh = isFresh(status);
+   const guardedNodes = status?.nodes ?? {};
+   const quarantined = Object.values(guardedNodes).filter((node) => node.disabled_by_guard).length;
+diff --git a/tools/egress-quality-guard/compose.override.example.yml b/tools/egress-quality-guard/compose.override.example.yml
+index 2b60561..ceda122 100644
+--- a/tools/egress-quality-guard/compose.override.example.yml
++++ b/tools/egress-quality-guard/compose.override.example.yml
+@@ -2,6 +2,9 @@
+ # Keep the real environment file outside the repository with mode 0600.
+ services:
+   grok2api:
++    build:
++      context: .
++      dockerfile: Dockerfile
+     environment:
+       QUALITY_GUARD_STATE_FILE: /var/lib/grok2api-quality-guard/state.json
+       QUALITY_GUARD_RUNTIME_CONFIG_FILE: /var/lib/grok2api-quality-guard/runtime-config.json
+@@ -17,6 +20,9 @@ services:
+         condition: service_healthy
+     env_file:
+       - ${QUALITY_GUARD_ENV_FILE:-/etc/grok2api-egress-quality-guard.env}
++    environment:
++      # The guard runs in its own container; 127.0.0.1 would point back to it.
++      GROK2API_BASE_URL: http://grok2api:8000
+     volumes:
+       - quality_guard_state:/var/lib/grok2api-quality-guard
+     restart: unless-stopped
+-- 
+2.34.1
+

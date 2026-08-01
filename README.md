@@ -7,6 +7,7 @@
 - 上游版本：`v3.0.11`
 - 上游提交：`090104504b403d65675a01dab9c92b3a235ee832`
 - 补丁提交：见 `MANIFEST.json` 的 `patch_commit`（闭环 hard 隔离版）
+- 后续修复补丁：`patches/0002-fix-quality-guard-empty-node-selection.patch`
 - 上游 Draft PR：[chenyme/grok2api#837](https://github.com/chenyme/grok2api/pull/837)
 - 可运行 Fork：[lij768423-svg/grok2api](https://github.com/lij768423-svg/grok2api/tree/main)
 
@@ -26,6 +27,7 @@
 - 被动审计按 grok2api 面板同口径计算 `输出 Token / (总耗时 - 首字耗时)`，其中输出 Token 包含推理 Token。
 - **被动硬阈值立即隔离节点**；软阈值触发固定 Prompt 主动复测，连续命中后才隔离。
 - 主动软/硬阈值、连续探测错误、最低健康节点、隔离与自动恢复保护。
+- `QUALITY_GUARD_NODE_IDS` 为空时默认监控全部启用且已配置代理的 `grok_build` 节点。
 - 管理端质量守护页面、手动诊断、策略热加载和累计统计。
 - 独立 Python sidecar、Docker Compose、systemd、安全说明和中英文文档。
 
@@ -38,7 +40,9 @@
 ```sh
 git fetch --tags origin
 git checkout -b egress-enhancements v3.0.11
-git am --3way /path/to/grok2api-egress-enhancements/patches/0001-feat-add-egress-recovery-and-quality-guard.patch
+git am --3way \
+  /path/to/grok2api-egress-enhancements/patches/0001-feat-add-egress-recovery-and-quality-guard.patch \
+  /path/to/grok2api-egress-enhancements/patches/0002-fix-quality-guard-empty-node-selection.patch
 ```
 
 如果目标版本高于 `v3.0.11`，建议使用 [AI 合并指南](./docs/AI_MERGE_GUIDE.md)，让工具按功能不变量解决冲突，而不是直接覆盖新版文件。

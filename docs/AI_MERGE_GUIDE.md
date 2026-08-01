@@ -29,7 +29,9 @@
 
 ```sh
 git checkout -b port-egress-enhancements
-git am --3way patches/0001-feat-add-egress-recovery-and-quality-guard.patch
+git am --3way \
+  patches/0001-feat-add-egress-recovery-and-quality-guard.patch \
+  patches/0002-fix-quality-guard-empty-node-selection.patch
 ```
 
 如果 `git am` 停在冲突状态，让 AI 工具先运行 `git status`，逐个读取冲突文件的新版上下文和补丁对应 hunk。不要使用 `git checkout --theirs` 批量覆盖。
