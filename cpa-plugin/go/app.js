@@ -57,9 +57,9 @@
   };
 
   function managementKey() {
-    try {
-      const storageKey = 'authToken';
+    const decodeStoredValue = (storageKey) => {
       let raw = localStorage.getItem(storageKey) || '';
+      if (!raw) return null;
       if (raw.startsWith('enc::v1::')) {
         const encoded = atob(raw.slice(9));
         const value = Uint8Array.from(encoded, (char) => char.charCodeAt(0));
@@ -67,14 +67,20 @@
         for (let index = 0; index < value.length; index += 1) value[index] ^= key[index % key.length];
         raw = new TextDecoder().decode(value);
       }
-      const decoded = JSON.parse(raw);
-      return typeof decoded === 'string' ? decoded : '';
+      return JSON.parse(raw);
+    };
+    try {
+      const legacy = decodeStoredValue('authToken');
+      if (typeof legacy === 'string' && legacy) return legacy;
+      const current = decodeStoredValue('cli-proxy-auth');
+      const key = current?.state?.managementKey;
+      return typeof key === 'string' ? key : '';
     } catch (_) { return ''; }
   }
 
   async function rawRequest(path, options = {}) {
     const key = managementKey();
-    if (!key) throw new Error('CPA 管理登录状态不可用，请重新登录管理面板');
+    if (!key) throw new Error('CPA 管理密钥未持久化，请重新登录管理面板并勾选“记住密码”');
     return fetch(MANAGEMENT_API, {
       method: 'POST', cache: 'no-store',
       headers: {'Content-Type':'application/json','Accept':options.accept || 'application/json','Authorization':'Bearer ' + key,'X-Grok2API-Egress-UI':'1'},

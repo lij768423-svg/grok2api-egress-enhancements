@@ -56,8 +56,11 @@ plugins:
 
 Set `GROK2API_ADMIN_USERNAME` and `GROK2API_ADMIN_PASSWORD` only in the
 CLIProxyAPI process environment. Restart CLIProxyAPI, sign in to its management
-panel, then open **Grok2API Egress**. Mutations use CLIProxyAPI's authenticated
-Management API; the grok2api access token is never exposed to the browser.
+panel with **Remember password** enabled, then open **Grok2API Egress**. The
+embedded iframe reads the encrypted management session from CPA's own
+`cli-proxy-auth` storage entry; legacy `authToken` storage is also supported.
+Mutations use CLIProxyAPI's authenticated Management API; the grok2api access
+token is never exposed to the browser.
 
 The direct plugin page is registered at:
 

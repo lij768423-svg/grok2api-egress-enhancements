@@ -46,7 +46,7 @@ func TestAllowedGrokManagementMethodProtectsCredentialExport(t *testing.T) {
 
 func TestRenderStatusPageEmbedsTokens(t *testing.T) {
 	page := string(renderStatusPage())
-	for _, want := range []string{"Grok2API 管理工作台", "--background:", "data-view=\"accounts\"", "X-Grok2API-Egress-UI", "导出选中"} {
+	for _, want := range []string{"Grok2API 管理工作台", "--background:", "data-view=\"accounts\"", "X-Grok2API-Egress-UI", "cli-proxy-auth", "导出选中"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("rendered page missing %q", want)
 		}
