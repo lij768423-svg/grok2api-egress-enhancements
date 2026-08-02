@@ -1,6 +1,6 @@
-# grok2api 出口增强补丁
+# Grok2API & CPA 出口质量守护
 
-这是一个非官方增强分发仓库，为 [chenyme/grok2api](https://github.com/chenyme/grok2api) 增加固定代理快速恢复和可选的出口质量守护。仓库不复制上游完整源码，只发布可审计的 Git patch、功能说明、AI 合并指南和可选 CPA 管理插件源码。
+这是一个非官方增强分发仓库：为 [chenyme/grok2api](https://github.com/chenyme/grok2api) 提供固定代理快速恢复和出口质量守护补丁，同时提供零 Grok2API 运行时依赖的纯 CPA 原生插件。仓库不复制上游完整源码，只发布可审计的 Git patch、功能说明、AI 指南和 CPA 插件源码。
 
 当前补丁基于：
 

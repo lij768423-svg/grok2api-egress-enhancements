@@ -1,6 +1,6 @@
-# grok2api egress enhancement patches
+# Grok2API & CPA egress quality guard
 
-This is an unofficial enhancement distribution for [chenyme/grok2api](https://github.com/chenyme/grok2api). It adds immediate fixed-proxy recovery and an optional egress quality guard without copying the complete upstream repository. It also includes source for an optional CLIProxyAPI management plugin.
+This is an unofficial enhancement distribution for [chenyme/grok2api](https://github.com/chenyme/grok2api): it provides immediate fixed-proxy recovery and egress quality-guard patches, plus a pure CPA-native plugin with no Grok2API runtime dependency. The repository does not copy the complete upstream source.
 
 Current baseline:
 
