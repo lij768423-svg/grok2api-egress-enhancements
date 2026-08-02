@@ -1,45 +1,368 @@
-# CPA Grok2API Egress plugin
+# grok2api-egress
 
-This optional CLIProxyAPI plugin embeds a compact operations page for the
-grok2api egress quality guard. It provides:
+> 纯 [CLIProxyAPI (CPA)](https://github.com/router-for-me/CLIProxyAPI) 原生插件：多出口节点管理 · 账号粘性绑定 · 被动/主动质量探测 · 降智隔离与自动迁出。
+> **零 Grok2API 运行时依赖** — 账号、代理、探测全部走 CPA Host API。
 
-- live guard status, statistics, events, and light/dark themes;
-- node add, edit, delete, enable, disable, search, and batch operations;
-- connectivity checks and real-model quality tests;
-- editable active/passive/hybrid guard policy;
-- server-side grok2api administrator login, so proxy URLs and administrator
-  credentials are never returned to the browser.
+从代理出口规划、每节点账号容量、Docker 网络、隔离迁号，到强制住宅 IP 轮换和真实模型复测的完整操作见 [AI 部署与运维指南](./AI_USAGE_GUIDE.md)。
 
-The UI intentionally manages only `grok_build` nodes. Saved proxy URLs are
-write-only: editing with an empty proxy field preserves the existing value.
+| | |
+|---|---|
+| 插件名 | `grok2api-egress` |
+| 当前版本 | **1.0.3** |
+| 语言 | Go (`-buildmode=c-shared` → `.so`) |
+| CPA SDK | `CLIProxyAPI/v7` (`pluginabi` / `pluginapi`) |
+| 能力 | Management UI + Usage Plugin |
+| License | MIT（见仓库根目录 `LICENSE`） |
 
-## Build
+---
 
-Requirements: Go 1.26+, CGO, and a C compiler.
+## 它解决什么问题
 
-```sh
-cd cpa-plugin/go
-go test ./...
-go build -buildmode=c-shared -trimpath -o grok2api-egress.so .
+多账号 + 多出口（住宅/ISP 代理）跑 xAI / Grok 时，常见两类故障：
+
+1. **出口降智 / 限速**：同一出口 IP 被打穿后，输出 Token/s 可能异常飙升，表现像“模型变笨”。
+2. **账号与出口纠缠**：出问题后账号仍粘在坏出口上，整池成功率一起塌。
+
+本插件在 CPA 内完成：
+
+- 把出口抽象成 **Node**（存 proxy URL）
+- 把 CPA `xai-*.json` 账号的 `proxy_url` **粘性绑定**到 Node
+- 用 **被动 usage 观测 + 主动 quality probe** 判定 healthy / soft / hard / error
+- **隔离（quarantine）坏节点**，并 **migrate** 账号到健康通道
+- 提供完整 **管理 UI**（节点 CRUD、批量、重平衡、质量测试、策略、事件）
+
+灵感来自 Grok2API 侧的 quality-guard / egress 思路，但实现已完全 native 化，**不需要、也不连接 Grok2API**。
+
+---
+
+## 架构
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  CLIProxyAPI (host)                                     │
+│   ├─ Management UI  ──► /v0/resource/plugins/.../status │
+│   ├─ Management API ──► /v0/management/grok2api-egress  │
+│   ├─ Usage hook     ──► MethodUsageHandle (被动 TPS)    │
+│   └─ Auth files     ──► xai-*.json (proxy_url 绑定)     │
+│                                                         │
+│  plugin: grok2api-egress.so                             │
+│   ├─ store.go      状态持久化 (nodes/policy/events)      │
+│   ├─ auth_bind.go  绑定 / 重平衡 / 迁出 / 禁用          │
+│   ├─ guard.go      探测 · 分类 · 隔离 · 恢复            │
+│   ├─ main.go       ABI · UI 代理 · API 路由             │
+│   └─ page.html     管理台（embed）                      │
+└─────────────────────────────────────────────────────────┘
+          │ sticky proxy_url
+          ▼
+   Node1 :7951   Node2 :7952   Node3 :7953   … (任意 HTTP/SOCKS)
 ```
 
-Copy the resulting `.so` into CLIProxyAPI's plugin directory and enable it:
+**状态文件**（默认）：
+
+```text
+/CLIProxyAPI/plugin-data/egress-guard/state.json
+```
+
+可通过插件配置字段 `state_file` 覆盖。请把该路径挂进容器可写卷。
+
+---
+
+## 功能一览
+
+### 节点（Egress Node）
+
+| 能力 | 说明 |
+|---|---|
+| CRUD | 名称、proxy URL、启用、容量、是否参与池 |
+| 连通性测试 | 经该出口探测外网出口 IP / 延迟 |
+| 质量测试 | 真实 chat 探测，计算 output Token/s |
+| 绑定账号 | 查看粘在该节点 `proxy_url` 上的账号列表 |
+| 批量启停 / 删除 | 删除前自动解绑 proxy |
+
+### 账号粘性与调度
+
+| 能力 | 说明 |
+|---|---|
+| Rebalance | 把启用中的 xAI 账号均分到健康节点 |
+| Migrate on quarantine | 隔离后立刻把账号迁到其他健康节点 |
+| Disable on hard（可选） | 隔离后无健康通道可迁移或迁移失败时，兜底 disable 原节点账号 |
+
+绑定介质是 CPA auth JSON 里的 **`proxy_url` 字段**，不引入外部账号库。
+
+### 质量守护（降智隔离）
+
+| 模式 | 行为 |
+|---|---|
+| `passive` | 只吃 Usage 事件，算 TPS 分类 |
+| `active` | 定时对节点做 quality probe |
+| `hybrid`（默认） | 被动 + 主动 |
+
+分类阈值（默认，可在 UI 改）：
+
+| 等级 | 默认阈值 | 动作 |
+|---|---|---|
+| healthy | TPS &lt; soft | 保持 |
+| soft | ≥ `soft_tps`（500） | 连续 N 次 → 隔离 |
+| hard | ≥ `hard_tps`（1000） | 立即隔离 |
+| error | 探测失败 | 连续 N 次 → 隔离 |
+
+隔离时：
+
+1. 节点 `quarantined_until = now + quarantine_seconds`
+2. 记事件 `node_quarantined`
+3. **migrate** 账号到健康节点（`accounts_migrated`）
+4. 到期后 probe 通过 → `node_restored`
+
+保护项：
+
+- `min_healthy_nodes`：低于阈值则 **suppressed**，避免全军覆没
+- `minGenMs = 200`：极短生成窗口不虚高 TPS，降低 loadtest / 短回复误隔离
+- 极小 `output_tokens`（&lt;32）不做 hard 判定
+
+### 管理 UI
+
+菜单名：**出口守护**
+路径：CPA 管理台 → 插件资源 `/status`
+
+- 总览指标（健康 / 软 / 硬 / 隔离）
+- 节点表：状态徽章、TPS、出口 IP、绑定数、隔离倒计时
+- 行内：连通测试 / 质量测试 / 编辑 / 绑定账号 / 启停
+- 策略表单、事件时间线、一键重平衡
+
+UI 经 management 代理，请求头需 `X-Grok2API-Egress-UI: 1`（页面已内置）。
+
+---
+
+## 目录结构
+
+```text
+egress-guard-native/
+├── go/
+│   ├── main.go          # CGO ABI、注册、Management/Usage 入口
+│   ├── store.go         # state.json 读写、节点/策略/事件
+│   ├── auth_bind.go     # list/get/save auth、rebalance、migrate
+│   ├── guard.go         # TPS、probe、quarantine、background worker
+│   ├── page.html        # 管理 UI（go:embed）
+│   ├── tokens.css       # 设计 token
+│   ├── main_test.go
+│   ├── go.mod
+│   └── grok2api-egress.so   # 构建产物（勿提交可执行二进制到 git；可 CI 产出）
+├── loadtest/
+│   ├── cpa-egress-loadtest.py   # 持续压测
+│   └── cpa-egress-monitor.py    # 健康监视 + 告警 JSONL
+├── import_from_g2a.py           # （可选）从 Grok2API 导出账号一次性导入 CPA
+└── README.md
+```
+
+---
+
+## 构建
+
+依赖：Go 1.22+（开发环境曾用 1.26）、CGO、与目标 CPA 同架构的 glibc。
+
+```bash
+cd go
+go mod tidy
+go build -buildmode=c-shared -o grok2api-egress.so .
+```
+
+产物：
+
+- `grok2api-egress.so`
+- `grok2api-egress.h`（可忽略，host 不依赖此头）
+
+交叉编译注意：`.so` 必须与 **CPA 进程架构 / libc** 一致（常见 `linux/amd64`）。
+
+---
+
+## 安装（CPA）
+
+1. 复制插件：
+
+```bash
+cp grok2api-egress.so /path/to/CLIProxyAPI/plugins/
+```
+
+2. 确保可写状态目录（compose 示例）：
 
 ```yaml
-plugins:
-  enabled: true
-  configs:
-    grok2api-egress:
-      enabled: true
-      priority: 2
-      grok2api_base_url: "http://100.102.32.24:8181"
-      hard_tps: 1000
-      soft_tps: 500
-      disable_on_hard: false
-      fetch_timeout_sec: 4
+volumes:
+  - ./plugin-data/egress-guard:/CLIProxyAPI/plugin-data/egress-guard
 ```
 
-Set `GROK2API_ADMIN_USERNAME` and `GROK2API_ADMIN_PASSWORD` only in the
-CLIProxyAPI process environment. Restart CLIProxyAPI, sign in to its management
-panel, then open **Grok2API Egress**. Mutations use CLIProxyAPI's authenticated
-Management API; the grok2api access token is never exposed to the browser.
+3. 插件配置（CPA 插件 YAML，仅一项）：
+
+```yaml
+state_file: /CLIProxyAPI/plugin-data/egress-guard/state.json
+```
+
+4. 重启 CPA，管理台应出现菜单 **「出口守护」**。
+
+---
+
+## 快速上手
+
+1. **加节点**
+   每个出口一条，例如：
+   - `http://127.0.0.1:7951`
+   - `http://127.0.0.1:7952`
+   - `http://127.0.0.1:7953`
+   （CPA 若用 host 网络，可直接打本机 sticky 代理端口。）
+
+2. **连通测试** → 确认 `exit_ip` 各不相同（真正粘在不同出口）。
+
+3. **导入 / 准备 xAI 账号**
+   CPA 标准 auth 文件；本仓库 `import_from_g2a.py` 可做一次性迁移。
+   **注意**：若账号 refresh token 只能单端使用，导入 CPA 后请在原端禁用，避免双端互踢。
+
+4. **一键重平衡**
+   UI「重平衡」或 API `POST /nodes/rebalance`，把账号 `proxy_url` 均分到健康节点。
+
+5. **开 hybrid 守护**
+   默认即可；按业务调 `soft_tps` / `hard_tps` / `quarantine_seconds`。
+
+6. **质量测试**
+   单节点「质量测试」应返回 healthy + 合理 TPS；401 时检查 xAI auth 是否带齐客户端头（插件 probe 会强制 `X-XAI-Token-Auth` 等）。
+
+---
+
+## Management API 摘要
+
+入口（CPA）：
+
+```http
+POST /v0/management/grok2api-egress/api
+Header: X-Grok2API-Egress-UI: 1
+Content-Type: application/json
+
+{
+  "method": "GET|POST|PUT|PATCH|DELETE",
+  "path": "/status",
+  "body": { }
+}
+```
+
+| path | method | 作用 |
+|---|---|---|
+| `/status` | GET | 总览、节点 map、策略、事件、统计 |
+| `/policy` | GET/PUT | 读写守护策略 |
+| `/nodes` | GET/POST/DELETE | 列表 / 创建 / 批量删 |
+| `/nodes/batch` | PATCH | 批量启停 |
+| `/nodes/test` | POST | 批量连通测试 |
+| `/nodes/rebalance` | POST | 账号重平衡 |
+| `/nodes/{id}` | GET/PUT/DELETE | 单节点 |
+| `/nodes/{id}/test` | POST | 连通测试 |
+| `/nodes/{id}/quality-test` | POST | 质量探测 |
+| `/nodes/{id}/accounts` | GET | 绑定账号列表 |
+
+（另保留若干 `/quality-guard/*` 别名路径，便于从旧 UI 习惯迁移。）
+
+---
+
+## 压测与监视（可选）
+
+```bash
+# 持续 chat 压测（示例）
+python3 loadtest/cpa-egress-loadtest.py \
+  --base http://127.0.0.1:8317/v1 \
+  --api-key "$CPA_LOADTEST_API_KEY" \
+  --workers 3 --max-tokens 16 --hours 2 \
+  --log-dir /var/log/cpa-loadtest
+
+# 旁路监视（读插件 status + loadtest 进度，写 monitor.jsonl）
+CPA_LOADTEST_LOG_DIR=/var/log/cpa-loadtest \
+  python3 loadtest/cpa-egress-monitor.py
+```
+
+监视脚本只从 `CPA_MANAGEMENT_KEY` 读取管理密钥；如管理地址不是本机，设置
+`CPA_MANAGEMENT_BASE_URL`。压测和监视日志应写到仓库外的运行目录。
+
+建议：
+
+- 使用 **专用 CPA API Key**，与生产流量隔离
+- 短 `max_tokens` 适合打通链路；测真实降智请加大生成量并相应调高 `hard_tps` 判定窗口
+- `NO_PROXY` / 直连 CPA，避免本机 HTTP_PROXY 把管理/业务流量拐走
+
+### 一次实测快照（v1.0.3）
+
+| 项 | 结果 |
+|---|---|
+| 时长 | ~30 min（SIGINT 停止） |
+| 请求 | ok **985** / fail **50**（fail 多为重启窗口历史错误，稳态后几乎不再涨） |
+| 成功率 | **~95.2%** |
+| 节点 | 3 sticky 出口，分配 184 / 183 / 183 |
+| 守护动作 | quarantined **4** · restored **6** · suppressed **9** |
+| 结束态 | **Q=0 · H=3**，三通道 healthy |
+
+---
+
+## 设计要点（给贡献者）
+
+1. **Auth → Node 映射**
+   以 `proxy_url` 字符串相等为键；Usage 事件里的 auth 标识会经 cache（index / name / email / path）反查。映射失败时 hard 观测可 fallback 到最繁忙启用节点，避免“有 hard 统计却永不隔离”。
+
+2. **Quality probe**
+   强制 Grok/xAI 客户端头；节点上多账号轮试，降低单账号 401 误判。
+
+3. **隔离与恢复**
+   quarantine 写状态 → migrate → 后台 worker 到期探测 → restore。
+   已知边界：并发隔离/恢复时曾出现 **UI 显示 healthy 但 `quarantined=true` 粘住**；运维侧可清 state 后 rebalance。欢迎 PR 做状态机收敛（以 `quarantined_until` 为唯一真源，cls 派生）。
+
+4. **误报控制**
+   - 最短生成窗口 `minGenMs`
+   - 小输出不做 hard
+   - `min_healthy_nodes` 抑制
+
+5. **安全**
+   - UI API 校验自定义头，降低 CSRF 式误触
+   - `proxy_url` 对前端 DTO 可做脱敏（按部署需要加强）
+   - 状态文件含出口 URL，权限应仅 host 可读
+
+---
+
+## 从 Grok2API 迁移（可选）
+
+`import_from_g2a.py`：读取 Grok2API 侧账号导出 → 写成 CPA xAI auth JSON → 可选在源端 disable refresh，保证 **token 只服务 CPA**。
+
+这是一次性迁移工具，不是插件运行时依赖。运行前通过环境变量提供
+`GROK2API_ADMIN_USERNAME`、`GROK2API_ADMIN_PASSWORD`，并按需设置
+`GROK2API_BASE_URL`、`CPA_AUTH_DIR`；不要把这些值写进仓库或命令示例。
+
+迁移清单：
+
+- [ ] 导出账号
+- [ ] 写入 CPA auth 目录
+- [ ] 源端禁用 / 停止 refresh
+- [ ] CPA 建齐 egress 节点
+- [ ] rebalance
+- [ ] 小流量 quality-test
+- [ ] 再放生产
+
+---
+
+## 路线图 / 欢迎 PR
+
+- [ ] 修复 sticky-q（healthy 与 quarantined 标志长期不一致）
+- [ ] 事件/统计按时间窗滑动，避免历史 5xx 永久污染告警
+- [ ] 节点维度的成功率 SLO 与自动扩缩绑定
+- [ ] CI：`go test` + 多架构 `.so` release
+- [ ] 英文 UI / i18n
+- [ ] 补 SPDX License
+
+---
+
+## 致谢
+
+- [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) 插件 ABI 与 Host API
+- Grok2API quality-guard 社区对「出口降智」问题的早期实践
+
+---
+
+## 免责声明
+
+本项目用于 **自有基础设施** 上的出口质量治理与账号调度。请遵守 xAI / 代理服务商 ToS 与当地法律；不要把他人的 token、未授权的出口或生产密钥提交进仓库。开源发布前请清理：
+
+- 真实 API Key / refresh token
+- 生产 `state.json`
+- loadtest 日志与 `monitor.jsonl`
+- 内网 IP / 家庭出口指纹（文档里用占位符）

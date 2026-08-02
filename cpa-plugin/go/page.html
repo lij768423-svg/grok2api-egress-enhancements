@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
   <meta name="color-scheme" content="light dark">
   <link rel="icon" href="data:,">
-  <title>Grok2API 出口守护</title>
+  <title>出口守护</title>
   <style>
 /*__HALLMARK_TOKENS__*/
     * { box-sizing: border-box; border-color: var(--border); }
@@ -62,7 +62,7 @@
     .batch-bar { min-height: 3rem; display: flex; align-items: center; justify-content: space-between; gap: var(--space-sm); padding: var(--space-2xs) var(--space-sm); border-bottom: var(--rule-hairline) solid var(--border); background: var(--muted); }
     .batch-bar span { font-size: var(--text-xs); color: var(--muted-foreground); }
     .table-wrap { max-width: 100%; overflow: auto; }
-    table { width: 100%; min-width: 1080px; border-collapse: collapse; }
+    table { width: 100%; min-width: 960px; border-collapse: collapse; }
     th, td { padding: var(--space-xs); border-bottom: var(--rule-hairline) solid var(--border); text-align: left; vertical-align: middle; }
     th { position: sticky; top: 0; z-index: 1; background: var(--card); color: var(--muted-foreground); font-size: var(--text-xs); font-weight: 550; white-space: nowrap; }
     td { font-size: var(--text-xs); }
@@ -70,15 +70,34 @@
     tbody tr:hover td { background: color-mix(in oklch, var(--secondary) 55%, transparent); }
     .check-cell { width: 2.5rem; text-align: center; }
     .node-name { max-width: 14rem; font-weight: 620; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-    .subtext { margin-top: var(--space-3xs); color: var(--muted-foreground); font-size: var(--text-2xs); white-space: nowrap; }
+    .subtext { margin-top: var(--space-3xs); color: var(--muted-foreground); font-size: var(--text-2xs); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 22rem; }
     .numeric { text-align: right; font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
     .badge { display: inline-flex; align-items: center; min-height: 1.35rem; border-radius: 999px; padding: 0 var(--space-2xs); font-size: var(--text-2xs); font-weight: 650; white-space: nowrap; }
     .badge.good { color: var(--success); background: var(--success-surface); }
     .badge.warn { color: var(--warning); background: var(--warning-surface); }
     .badge.bad { color: var(--destructive); background: var(--danger-surface); }
     .badge.muted { color: var(--muted-foreground); background: var(--secondary); }
-    .row-actions { justify-content: flex-end; }
+    .row-actions { justify-content: flex-end; flex-wrap: wrap; }
     .row-actions .button { min-height: 2rem; padding: 0 var(--space-2xs); }
+    th.actions-col, td.actions-col {
+      position: sticky; right: 0; z-index: 2;
+      background: var(--card);
+      box-shadow: -8px 0 12px -12px oklch(0 0 0 / 0.35);
+      text-align: right;
+      min-width: 15rem;
+    }
+    tbody tr:hover td.actions-col { background: color-mix(in oklch, var(--secondary) 55%, var(--card)); }
+    .node-cards { display: none; gap: var(--space-sm); padding: var(--space-sm); }
+    .node-card {
+      border: var(--rule-hairline) solid var(--border); border-radius: var(--radius-md);
+      padding: var(--space-sm); background: var(--background); display: grid; gap: var(--space-2xs);
+    }
+    .node-card-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-sm); }
+    .node-card-meta { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-2xs); font-size: var(--text-2xs); color: var(--muted-foreground); }
+    .node-card-meta strong { display: block; color: var(--foreground); font-size: var(--text-xs); font-variant-numeric: tabular-nums; }
+    .account-list { max-height: 16rem; overflow: auto; display: grid; gap: var(--space-2xs); }
+    .account-row { display: flex; justify-content: space-between; gap: var(--space-sm); padding: var(--space-2xs) 0; border-bottom: var(--rule-hairline) solid var(--border); font-size: var(--text-xs); }
+    .account-row:last-child { border-bottom: 0; }
     .empty, .loading, .error-state { padding: var(--space-xl) var(--space-sm); text-align: center; color: var(--muted-foreground); font-size: var(--text-xs); }
     .error-state { color: var(--destructive); }
     .stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
@@ -128,13 +147,18 @@
       .stat:nth-last-child(-n+2) { border-bottom: 0; }
       .lower-grid { grid-template-columns: minmax(0, 1fr); }
     }
+    @media (max-width: 900px) {
+      .desktop-table { display: none; }
+      .node-cards { display: grid; }
+      table { min-width: 0; }
+    }
     @media (max-width: 600px) {
       .shell { padding: var(--space-sm); }
       .page-head, .section-head, .batch-bar { align-items: stretch; flex-direction: column; }
       .head-actions, .toolbar, .batch-actions { width: 100%; }
       .toolbar { justify-content: flex-start; }
       .search { width: 100%; }
-      .metrics, .stats, .form-grid { grid-template-columns: minmax(0, 1fr); }
+      .metrics, .stats, .form-grid, .node-card-meta { grid-template-columns: minmax(0, 1fr); }
       .metric { border-right: 0; border-bottom: var(--rule-hairline) solid var(--border); }
       .metric:nth-child(2) { border-bottom: var(--rule-hairline) solid var(--border); }
       .metric:last-child { border-bottom: 0; }
@@ -142,6 +166,8 @@
       .stat:last-child { border-bottom: 0; }
       .field.full { grid-column: auto; }
       .modal-actions .button { flex: 1; }
+      .row-actions { width: 100%; }
+      .row-actions .button { flex: 1; }
     }
     @media (prefers-reduced-motion: reduce) {
       *, *::before, *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition-duration: 1ms !important; }
@@ -152,8 +178,8 @@
   <main class="shell stack">
     <header class="page-head">
       <div>
-        <h1>Grok2API 出口守护</h1>
-        <p>统一管理出口节点、质量检测与隔离策略</p>
+        <h1>出口守护</h1>
+        <p>纯 CPA 实现 · Group Free 降智隔离 · 节点 CRUD · 质量检测 · 账号通道绑定</p>
       </div>
       <div class="head-actions">
         <span class="status-line"><span id="service-dot" class="status-dot"></span><span id="service-text">正在连接</span></span>
@@ -174,6 +200,7 @@
         <div><h2 id="nodes-title">出口节点</h2><p>代理凭据仅在保存时提交，页面不会读取或回显</p></div>
         <div class="toolbar">
           <input id="node-search" class="search" type="search" placeholder="搜索节点、IP 或 ID" aria-label="搜索节点">
+          <button id="rebalance-nodes" class="button" type="button" title="按启用节点把 CPA 账号 proxy_url 重新均分">重平衡账号</button>
           <button id="add-node" class="button primary" type="button">添加节点</button>
         </div>
       </div>
@@ -186,15 +213,16 @@
           <button class="button danger" type="button" data-batch="delete">删除</button>
         </div>
       </div>
-      <div class="table-wrap">
+      <div class="table-wrap desktop-table">
         <table>
           <thead><tr>
             <th class="check-cell"><input id="select-all" type="checkbox" aria-label="选择所有节点"></th>
-            <th>节点</th><th>状态</th><th>出口 IP</th><th class="numeric">输出 Token/s</th><th class="numeric">首字</th><th>账号</th><th>最近观测</th><th style="text-align:right">操作</th>
+            <th>节点</th><th>状态</th><th>出口 IP</th><th class="numeric">输出 Token/s</th><th class="numeric">首字</th><th>账号</th><th>最近观测</th><th class="actions-col">操作</th>
           </tr></thead>
           <tbody id="nodes-body"><tr><td colspan="9" class="loading">正在加载节点</td></tr></tbody>
         </table>
       </div>
+      <div id="node-cards" class="node-cards" aria-label="节点卡片"></div>
     </section>
 
     <section class="section" aria-labelledby="statistics-title">
@@ -208,7 +236,7 @@
         <div id="events-list" class="events"><div class="loading">正在加载事件</div></div>
       </section>
       <section class="section" aria-labelledby="policy-title">
-        <div class="section-head"><div><h2 id="policy-title">守护策略</h2><p>修改后由 sidecar 自动重载</p></div><button id="edit-policy" class="button" type="button">编辑</button></div>
+        <div class="section-head"><div><h2 id="policy-title">守护策略</h2><p>修改后由 CPA 插件热加载</p></div><button id="edit-policy" class="button" type="button">编辑</button></div>
         <dl id="policy-view" class="policy"></dl>
       </section>
     </div>
@@ -216,7 +244,7 @@
 
   <div id="node-modal" class="modal-layer" hidden>
     <section class="modal wide" role="dialog" aria-modal="true" aria-labelledby="node-modal-title">
-      <div class="modal-head"><div><h3 id="node-modal-title">添加节点</h3><p>仅支持 grok_build 出口，保存后立即进入节点列表</p></div><button class="button icon ghost" type="button" data-close="node-modal" aria-label="关闭">×</button></div>
+      <div class="modal-head"><div><h3 id="node-modal-title">添加节点</h3><p>代理仅保存在 CPA 插件状态；绑定账号时写入账号 proxy_url</p></div><button class="button icon ghost" type="button" data-close="node-modal" aria-label="关闭">×</button></div>
       <form id="node-form">
         <div class="modal-body form-grid">
           <div class="field full check-row"><label for="node-enabled">启用节点</label><input id="node-enabled" type="checkbox" checked></div>
@@ -250,6 +278,13 @@
     </section>
   </div>
 
+  <div id="accounts-modal" class="modal-layer" hidden>
+    <section class="modal wide" role="dialog" aria-modal="true" aria-labelledby="accounts-modal-title">
+      <div class="modal-head"><div><h3 id="accounts-modal-title">绑定账号</h3><p id="accounts-modal-sub">该出口通道上的 CPA 账号</p></div><button class="button icon ghost" type="button" data-close="accounts-modal" aria-label="关闭">×</button></div>
+      <div class="modal-body"><div id="accounts-list" class="account-list"><div class="loading">加载中</div></div></div>
+      <div class="modal-actions"><button class="button" type="button" data-close="accounts-modal">关闭</button></div>
+    </section>
+  </div>
   <div id="confirm-modal" class="modal-layer" hidden>
     <section class="modal" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title">
       <div class="modal-head"><div><h3 id="confirm-title">确认操作</h3><p id="confirm-message"></p></div></div>
@@ -282,9 +317,9 @@
       return Math.floor(sec / 3600) + ' 小时前';
     };
     function managementKey() {
-      try {
-        let raw = localStorage.getItem('managementKey');
-        if (!raw) return '';
+      const decodeStoredValue = (storageKey) => {
+        let raw = localStorage.getItem(storageKey) || '';
+        if (!raw) return null;
         if (raw.startsWith('enc::v1::')) {
           const encoded = atob(raw.slice(9));
           const value = Uint8Array.from(encoded, (char) => char.charCodeAt(0));
@@ -292,13 +327,23 @@
           for (let index = 0; index < value.length; index += 1) value[index] ^= key[index % key.length];
           raw = new TextDecoder().decode(value);
         }
-        const decoded = JSON.parse(raw);
-        return typeof decoded === 'string' ? decoded : '';
+        try { return JSON.parse(raw); } catch (_) { return raw; }
+      };
+      try {
+        for (const storageKey of ['authToken', 'managementKey', 'cli-proxy-auth']) {
+          const decoded = decodeStoredValue(storageKey);
+          if (typeof decoded === 'string' && decoded) return decoded;
+          if (decoded && typeof decoded === 'object') {
+            const key = decoded.state?.managementKey || decoded.managementKey || decoded.token;
+            if (typeof key === 'string' && key) return key;
+          }
+        }
+        return '';
       } catch (_) { return ''; }
     }
     async function api(path, options = {}) {
       const key = managementKey();
-      if (!key) throw new Error('CPA 管理登录状态不可用，请重新登录管理面板');
+      if (!key) throw new Error('CPA 管理密钥未持久化，请重新登录管理面板并勾选“记住密码”');
       const response = await fetch(MANAGEMENT_API, {
         method: 'POST',
         headers: {'Content-Type':'application/json','Accept':'application/json','Authorization':'Bearer ' + key,'X-Grok2API-Egress-UI':'1'},
@@ -334,13 +379,14 @@
       try {
         const [status, list] = await Promise.all([
           api('/quality-guard'),
-          api('/nodes?page=1&pageSize=2000&scope=grok_build')
+          api('/nodes')
         ]);
         state.status = status;
-        state.nodes = Array.isArray(list.items) ? list.items : [];
+        const items = list.items || list.data?.items || [];
+        state.nodes = Array.isArray(items) ? items : [];
         state.selected = new Set([...state.selected].filter((id) => state.nodes.some((node) => node.id === id)));
         render();
-        setService(true, '已连接');
+        setService(true, status?.engine === 'cpa-native' ? 'CPA 原生守护' : '已连接');
       } catch (error) {
         setService(false, '连接失败');
         $('nodes-body').innerHTML = '<tr><td colspan="9" class="error-state">' + esc(error.message) + '</td></tr>';
@@ -365,7 +411,7 @@
       $('metric-mode').textContent = modeName(status.config?.mode);
       $('metric-model').textContent = status.config?.model || '-';
       $('metric-enabled').textContent = enabled + ' / ' + state.nodes.length;
-      $('metric-total').textContent = '已启用 / 全部 grok_build 节点';
+      $('metric-total').textContent = '已启用 / 全部 CPA 出口节点';
       $('metric-quarantined').textContent = String(quarantined);
       $('metric-quarantined').className = 'metric-value ' + (quarantined ? 'tone-bad' : 'tone-good');
       $('metric-next').textContent = quarantined ? '等待真实模型复测' : '当前无隔离节点';
@@ -384,6 +430,24 @@
       if (guard.last_classification === 'healthy') return '<span class="badge good">健康</span>';
       return '<span class="badge muted">待检测</span>';
     }
+    function quarantineCountdown(guard) {
+      const until = Number(guard.quarantined_until || 0);
+      if (!until || !guard.disabled_by_guard) return '';
+      const left = Math.max(0, Math.round(until - Date.now() / 1000));
+      if (left <= 0) return '复测到期';
+      if (left < 60) return left + ' 秒后复测';
+      return Math.ceil(left / 60) + ' 分钟后复测';
+    }
+    function actionButtons(node) {
+      return '<div class="row-actions">' +
+        '<button class="button" type="button" data-action="quality" title="真实模型质量检测">质量</button>' +
+        '<button class="button" type="button" data-action="connectivity" title="检查代理连通性">连通</button>' +
+        '<button class="button ghost" type="button" data-action="accounts" title="查看绑定账号">账号</button>' +
+        '<button class="button ghost" type="button" data-action="edit">编辑</button>' +
+        '<button class="button ghost" type="button" data-action="toggle">' + (node.enabled ? '停用' : '启用') + '</button>' +
+        '<button class="button danger" type="button" data-action="delete">删除</button>' +
+      '</div>';
+    }
     function renderNodes() {
       const nodes = filteredNodes();
       $('batch-bar').hidden = state.selected.size === 0;
@@ -392,6 +456,7 @@
       $('select-all').indeterminate = !($('select-all').checked) && nodes.some((node) => state.selected.has(node.id));
       if (!nodes.length) {
         $('nodes-body').innerHTML = '<tr><td colspan="9" class="empty">' + (state.search ? '没有匹配的节点' : '暂无出口节点') + '</td></tr>';
+        $('node-cards').innerHTML = '<div class="empty">' + (state.search ? '没有匹配的节点' : '暂无出口节点') + '</div>';
         return;
       }
       $('nodes-body').innerHTML = nodes.map((node) => {
@@ -399,22 +464,34 @@
         const cls = guard.last_classification || '';
         const tpsClass = cls === 'hard' ? 'tone-bad' : cls === 'soft' ? 'tone-warn' : '';
         const observed = guard.last_observed_at || guard.last_probe_at;
+        const reason = guard.last_reason || node.probeStatus || '-';
+        const cd = quarantineCountdown(guard);
         return '<tr data-id="' + esc(node.id) + '">' +
           '<td class="check-cell"><input type="checkbox" data-action="select" ' + (state.selected.has(node.id) ? 'checked' : '') + ' aria-label="选择 ' + esc(node.name) + '"></td>' +
           '<td><div class="node-name" title="' + esc(node.name) + '">' + esc(node.name) + '</div><div class="subtext">ID ' + esc(node.id) + ' · ' + (node.proxyPool ? '代理池' : '固定代理') + '</div></td>' +
-          '<td>' + nodeBadge(node, guard) + '<div class="subtext">' + esc(guard.last_reason || node.probeStatus || '-') + '</div></td>' +
+          '<td>' + nodeBadge(node, guard) + '<div class="subtext" title="' + esc(reason) + '">' + esc(reason) + (cd ? ' · ' + cd : '') + '</div></td>' +
           '<td><div>' + esc(node.exitIp || '-') + '</div><div class="subtext">' + esc(node.probeStatus || 'unknown') + ' · ' + number(node.probeLatencyMs) + ' ms</div></td>' +
           '<td class="numeric ' + tpsClass + '">' + (observed ? Number(guard.last_output_tps || 0).toFixed(1) : '-') + '</td>' +
           '<td class="numeric">' + (guard.last_first_token_ms ? number(guard.last_first_token_ms) + ' ms' : '-') + '</td>' +
           '<td><div>' + number(node.assignedAccountCount) + ' / ' + (node.accountCapacity || '∞') + '</div><div class="subtext">已绑定 / 容量</div></td>' +
           '<td title="' + esc(time(observed, true)) + '">' + relative(observed) + '<div class="subtext">' + esc(guard.last_source || '-') + '</div></td>' +
-          '<td><div class="row-actions">' +
-            '<button class="button" type="button" data-action="quality" title="真实模型质量检测">质量检测</button>' +
-            '<button class="button" type="button" data-action="connectivity" title="检查代理连通性">连通性</button>' +
-            '<button class="button ghost" type="button" data-action="edit">编辑</button>' +
-            '<button class="button ghost" type="button" data-action="toggle">' + (node.enabled ? '停用' : '启用') + '</button>' +
-            '<button class="button danger" type="button" data-action="delete">删除</button>' +
-          '</div></td></tr>';
+          '<td class="actions-col">' + actionButtons(node) + '</td></tr>';
+      }).join('');
+      $('node-cards').innerHTML = nodes.map((node) => {
+        const guard = nodeGuard(node);
+        const observed = guard.last_observed_at || guard.last_probe_at;
+        const reason = guard.last_reason || node.probeStatus || '-';
+        const cd = quarantineCountdown(guard);
+        return '<article class="node-card" data-id="' + esc(node.id) + '">' +
+          '<div class="node-card-head"><div><label><input type="checkbox" data-action="select" ' + (state.selected.has(node.id) ? 'checked' : '') + '> <strong>' + esc(node.name) + '</strong></label>' +
+          '<div class="subtext">ID ' + esc(node.id) + ' · ' + (node.proxyPool ? '代理池' : '固定代理') + '</div></div>' + nodeBadge(node, guard) + '</div>' +
+          '<div class="subtext" title="' + esc(reason) + '">' + esc(reason) + (cd ? ' · ' + cd : '') + '</div>' +
+          '<div class="node-card-meta">' +
+            '<div><span>出口 IP</span><strong>' + esc(node.exitIp || '-') + '</strong></div>' +
+            '<div><span>Token/s</span><strong>' + (observed ? Number(guard.last_output_tps || 0).toFixed(1) : '-') + '</strong></div>' +
+            '<div><span>首字</span><strong>' + (guard.last_first_token_ms ? number(guard.last_first_token_ms) + ' ms' : '-') + '</strong></div>' +
+            '<div><span>账号</span><strong>' + number(node.assignedAccountCount) + ' / ' + (node.accountCapacity || '∞') + '</strong></div>' +
+          '</div>' + actionButtons(node) + '</article>';
       }).join('');
     }
     function renderStatistics() {
@@ -434,12 +511,12 @@
     function renderEvents() {
       const events = state.status?.recentEvents || [];
       if (!events.length) { $('events-list').innerHTML = '<div class="empty">暂无守护事件</div>'; return; }
-      const names = {node_quarantined:'节点已隔离',node_restored:'节点已恢复',quality_probe_completed:'质量检测完成',node_rotated:'出口 IP 已轮换',quarantine_suppressed:'隔离已抑制'};
+      const names = {node_quarantined:'节点已隔离',node_restored:'节点已恢复',quality_probe_completed:'质量检测完成',node_rotated:'出口 IP 已轮换',quarantine_suppressed:'隔离已抑制',accounts_migrated:'账号已迁移'};
       $('events-list').innerHTML = events.slice().reverse().map((event) => '<div class="event"><div><strong>' + esc(names[event.event] || event.event || '守护事件') + ' · ' + esc(event.node_name || ('节点 ' + event.node_id)) + '</strong><small>' + esc(event.reason || event.classification || '-') + (event.output_tps ? ' · ' + Number(event.output_tps).toFixed(1) + ' Token/s' : '') + '</small></div><time>' + relative(event.ts) + '</time></div>').join('');
     }
     function renderPolicy() {
       const cfg = state.status?.config;
-      $('edit-policy').disabled = !cfg || state.status?.editable === false;
+      $('edit-policy').disabled = !cfg;
       if (!cfg) { $('policy-view').innerHTML = '<div class="empty">策略状态不可用</div>'; return; }
       const values = [['模式',modeName(cfg.mode)],['主动间隔',cfg.active_interval_seconds + ' 秒'],['被动轮询',cfg.passive_poll_seconds + ' 秒'],['软 / 硬阈值',cfg.soft_tps + ' / ' + cfg.hard_tps],['连续异常',cfg.consecutive_soft + ' / ' + cfg.consecutive_errors],['隔离复测',cfg.quarantine_seconds + ' 秒'],['最低健康节点',cfg.min_healthy_nodes],['模型',cfg.model]];
       $('policy-view').innerHTML = values.map((value) => '<div><dt>' + value[0] + '</dt><dd>' + esc(value[1]) + '</dd></div>').join('');
@@ -485,11 +562,31 @@
     async function testConnectivity(ids, button) {
       await mutate(button, () => api('/nodes/test', {method:'POST', body:{ids}}), '连通性检测完成');
     }
+
+    async function showAccounts(node, button) {
+      $('accounts-modal-title').textContent = node.name + ' · 绑定账号';
+      $('accounts-modal-sub').textContent = '共 ' + number(node.assignedAccountCount || 0) + ' 个 · 代理不回显';
+      $('accounts-list').innerHTML = '<div class="loading">加载中</div>';
+      openModal('accounts-modal');
+      busy(button, true);
+      try {
+        const result = await api('/nodes/' + encodeURIComponent(node.id) + '/accounts');
+        const items = result.items || result.data?.items || [];
+        if (!items.length) {
+          $('accounts-list').innerHTML = '<div class="empty">该节点暂无绑定账号</div>';
+        } else {
+          $('accounts-list').innerHTML = items.map((item) => '<div class="account-row"><div><strong>' + esc(item.email || item.name || '-') + '</strong><div class="subtext">' + esc(item.name || '') + '</div></div><div>' + (item.disabled ? '<span class="badge muted">停用</span>' : item.expired ? '<span class="badge warn">将过期</span>' : '<span class="badge good">可用</span>') + '</div></div>').join('');
+        }
+      } catch (error) {
+        $('accounts-list').innerHTML = '<div class="error-state">' + esc(error.message) + '</div>';
+      } finally { busy(button, false); }
+    }
     async function qualityTest(node, button) {
       busy(button, true);
       try {
         const result = await api('/quality-guard/nodes/' + encodeURIComponent(node.id) + '/test', {method:'POST'});
-        toast(node.name + '：' + Number(result.outputTokensPerSecond || 0).toFixed(1) + ' Token/s');
+        const data = result.data || result;
+        toast(node.name + '：' + (data.classification || '-') + ' · ' + Number(data.tps || 0).toFixed(1) + ' Token/s');
         await load(true);
       } catch (error) { toast(error.message, 'error'); }
       finally { busy(button, false); }
@@ -502,12 +599,23 @@
     });
     $('node-search').addEventListener('input', (event) => { state.search = event.target.value; renderNodes(); });
     $('add-node').addEventListener('click', () => openNode());
+    $('rebalance-nodes').addEventListener('click', async (event) => {
+      const button = event.currentTarget;
+      busy(button, true);
+      try {
+        const result = await api('/rebalance', {method:'POST'});
+        toast('账号已重平衡到启用节点');
+        await load(true);
+        console.debug('rebalance', result);
+      } catch (error) { toast(error.message, 'error'); }
+      finally { busy(button, false); }
+    });
     $('edit-policy').addEventListener('click', openPolicy);
     $('select-all').addEventListener('change', (event) => {
       filteredNodes().forEach((node) => event.target.checked ? state.selected.add(node.id) : state.selected.delete(node.id)); renderNodes();
     });
-    $('nodes-body').addEventListener('click', (event) => {
-      const row = event.target.closest('tr[data-id]'); const control = event.target.closest('[data-action]');
+    function handleNodeAction(event) {
+      const row = event.target.closest('[data-id]'); const control = event.target.closest('[data-action]');
       if (!row || !control) return;
       const node = state.nodes.find((item) => item.id === row.dataset.id); if (!node) return;
       const action = control.dataset.action;
@@ -516,8 +624,11 @@
       if (action === 'toggle') toggleNodes([node.id], !node.enabled, control);
       if (action === 'connectivity') testConnectivity([node.id], control);
       if (action === 'quality') qualityTest(node, control);
+      if (action === 'accounts') showAccounts(node, control);
       if (action === 'delete') confirmAction('删除节点', '将删除“' + node.name + '”。已绑定账号会失去该出口分配。', (button) => deleteNodes([node.id], button));
-    });
+    }
+    $('nodes-body').addEventListener('click', handleNodeAction);
+    $('node-cards').addEventListener('click', handleNodeAction);
     $('batch-bar').addEventListener('click', (event) => {
       const button = event.target.closest('[data-batch]'); if (!button) return;
       const ids = [...state.selected]; if (!ids.length) return;
@@ -529,7 +640,7 @@
     $('node-form').addEventListener('submit', async (event) => {
       event.preventDefault();
       const button = $('save-node'); const proxyURL = $('node-proxy').value.trim();
-      const body = {name:$('node-name').value.trim(),scope:'grok_build',enabled:$('node-enabled').checked,proxyPool:$('node-pool').checked,accountCapacity:Number($('node-capacity').value || 0),userAgent:'',cloudflareCookies:''};
+      const body = {name:$('node-name').value.trim(),enabled:$('node-enabled').checked,proxyPool:$('node-pool').checked,accountCapacity:Number($('node-capacity').value || 0)};
       if (proxyURL) body.proxyURL = proxyURL;
       if (!body.name || (!state.editing && !proxyURL)) { toast('请填写名称和代理 URL', 'error'); return; }
       busy(button, true);
@@ -552,7 +663,7 @@
     });
     document.addEventListener('click', (event) => { const close = event.target.closest('[data-close]'); if (close) closeModal(close.dataset.close); });
     $('confirm-action').addEventListener('click', () => { if (state.confirm) state.confirm($('confirm-action')); });
-    document.addEventListener('keydown', (event) => { if (event.key === 'Escape') ['node-modal','policy-modal','confirm-modal'].forEach((id) => { if (!$(id).hidden) closeModal(id); }); });
+    document.addEventListener('keydown', (event) => { if (event.key === 'Escape') ['node-modal','policy-modal','confirm-modal','accounts-modal'].forEach((id) => { if (!$(id).hidden) closeModal(id); }); });
     const savedTheme = localStorage.getItem('grok2api-egress-theme');
     document.documentElement.dataset.theme = savedTheme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
     load();

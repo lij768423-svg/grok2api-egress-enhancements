@@ -39,9 +39,9 @@ Current baseline:
 - Automatically discover proxied Build nodes when `QUALITY_GUARD_NODE_IDS` is empty while publishing resolved IDs for compatibility with older admin pages.
 - Python sidecar, Docker Compose and systemd examples, security notes, and bilingual documentation.
 
-### CPA management plugin
+### CPA-native egress guard plugin
 
-`cpa-plugin/go` provides an optional CLIProxyAPI shared-library plugin with node CRUD, batch operations, connectivity and real-model tests, policy editing, statistics, events, and light/dark themes. See [cpa-plugin/README.md](./cpa-plugin/README.md) for build and deployment instructions.
+`cpa-plugin/` is now the **v1.0.3 pure-CPA plugin**. It has no runtime dependency on Grok2API: it uses CPA Host APIs for auth files and usage events, binds `proxy_url` stickily to egress nodes, and provides node CRUD, batch operations, connectivity/real-model tests, quarantine migration, hot-reloadable policy, statistics, events, and light/dark themes. See [cpa-plugin/README.md](./cpa-plugin/README.md) for build instructions and the Chinese [AI deployment and operations guide](./cpa-plugin/AI_USAGE_GUIDE.md) for proxy topology, capacity planning, quarantine recovery, and forced residential-IP rotation.
 
 The quality guard is a heuristic circuit breaker, not proof that upstream model capability changed. Immediate hard quarantine is intentionally aggressive; raise `hard_tps` when false positives are more costly. Soft anomalies still require confirmation probes.
 

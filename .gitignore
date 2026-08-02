@@ -1,3 +1,15 @@
 .DS_Store
 *.swp
 *~
+
+# CPA plugin build and runtime artifacts
+cpa-plugin/go/*.so
+cpa-plugin/go/*.h
+cpa-plugin/**/state.json
+cpa-plugin/**/monitor.jsonl
+cpa-plugin/**/loadtest*.log
+cpa-plugin/**/loadtest*.stdout
+cpa-plugin/**/.env*
+cpa-plugin/**/auths/
+cpa-plugin/**/__pycache__/
+cpa-plugin/**/*.pyc
