@@ -11,7 +11,7 @@
     * { box-sizing: border-box; border-color: var(--border); }
     html, body { margin: 0; min-width: 0; overflow-x: clip; background: var(--background); color: var(--foreground); }
     body { font-family: var(--font-body); font-size: var(--text-md); line-height: 1.5; -webkit-font-smoothing: antialiased; }
-    button, input, select { font: inherit; }
+    button, input, select, textarea { font: inherit; }
     button { white-space: nowrap; }
     [hidden] { display: none !important; }
     .shell { width: min(100%, 1440px); margin: 0 auto; padding: var(--space-md); }
@@ -29,7 +29,7 @@
     .button { min-height: 2.25rem; display: inline-flex; align-items: center; justify-content: center; gap: var(--space-3xs); border: var(--rule-hairline) solid var(--border); border-radius: var(--radius-sm); padding: 0 var(--space-xs); background: var(--secondary); color: var(--secondary-foreground); font-size: var(--text-xs); font-weight: 600; line-height: 1; cursor: pointer; transition: background var(--dur-short) var(--ease-out), color var(--dur-short) var(--ease-out), opacity var(--dur-short) var(--ease-out), transform var(--dur-fast) var(--ease-out); }
     .button:hover { background: var(--accent); color: var(--accent-foreground); }
     .button:active { transform: translateY(1px); }
-    .button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
+    .button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible { outline: 2px solid var(--ring); outline-offset: 2px; }
     .button:disabled { opacity: 0.48; cursor: not-allowed; transform: none; }
     .button.primary { background: var(--primary); color: var(--primary-foreground); border-color: var(--primary); }
     .button.primary:hover { opacity: 0.9; }
@@ -53,11 +53,12 @@
     .section-head p { margin: var(--space-3xs) 0 0; color: var(--muted-foreground); font-size: var(--text-xs); }
     .toolbar { flex-wrap: wrap; justify-content: flex-end; }
     .search { width: min(16rem, 100%); }
-    input, select { min-height: 2.25rem; width: 100%; border: var(--rule-hairline) solid var(--input); border-radius: var(--radius-sm); padding: 0 var(--space-xs); background: var(--background); color: var(--foreground); }
-    input:hover, select:hover { border-color: var(--ring); }
+    input, select, textarea { min-height: 2.25rem; width: 100%; border: var(--rule-hairline) solid var(--input); border-radius: var(--radius-sm); padding: 0 var(--space-xs); background: var(--background); color: var(--foreground); }
+    textarea { min-height: 14rem; resize: vertical; padding: var(--space-xs); font-family: var(--font-mono); font-size: var(--text-xs); line-height: 1.6; }
+    input:hover, select:hover, textarea:hover { border-color: var(--ring); }
     input:user-invalid, select:user-invalid { border-color: var(--destructive); background: var(--danger-surface); }
     input:disabled, select:disabled { opacity: 0.55; cursor: not-allowed; background: var(--muted); }
-    input::placeholder { color: var(--muted-foreground); }
+    input::placeholder, textarea::placeholder { color: var(--muted-foreground); }
     input[type="checkbox"] { width: 1rem; min-height: 1rem; accent-color: var(--primary); }
     .batch-bar { min-height: 3rem; display: flex; align-items: center; justify-content: space-between; gap: var(--space-sm); padding: var(--space-2xs) var(--space-sm); border-bottom: var(--rule-hairline) solid var(--border); background: var(--muted); }
     .batch-bar span { font-size: var(--text-xs); color: var(--muted-foreground); }
@@ -184,7 +185,7 @@
       <div class="head-actions">
         <span class="status-line"><span id="service-dot" class="status-dot"></span><span id="service-text">正在连接</span></span>
         <button id="theme-button" class="button icon ghost" type="button" title="切换深浅色" aria-label="切换深浅色">◐</button>
-        <button id="refresh-button" class="button" type="button">刷新</button>
+        <button id="refresh-button" class="button" type="button" title="刷新页面快照，不会立即运行真实模型质量检测">刷新显示</button>
       </div>
     </header>
 
@@ -197,10 +198,11 @@
 
     <section class="section" aria-labelledby="nodes-title">
       <div class="section-head">
-        <div><h2 id="nodes-title">出口节点</h2><p>代理凭据仅在保存时提交，页面不会读取或回显</p></div>
+        <div><h2 id="nodes-title">出口节点</h2><p id="nodes-freshness">页面每 15 秒刷新；节点健康状态随请求审计或主动检测更新，代理凭据不会回显</p></div>
         <div class="toolbar">
           <input id="node-search" class="search" type="search" placeholder="搜索节点、IP 或 ID" aria-label="搜索节点">
           <button id="rebalance-nodes" class="button" type="button" title="按启用节点把 CPA 账号 proxy_url 重新均分">重平衡账号</button>
+          <button id="bulk-add-node" class="button" type="button">批量添加</button>
           <button id="add-node" class="button primary" type="button">添加节点</button>
         </div>
       </div>
@@ -254,6 +256,18 @@
           <div class="field full check-row"><div><label for="node-pool">代理池模式</label><p class="help">动态轮换代理开启；静态或固定代理关闭</p></div><input id="node-pool" type="checkbox"></div>
         </div>
         <div class="modal-actions"><button class="button" type="button" data-close="node-modal">取消</button><button id="save-node" class="button primary" type="submit">保存</button></div>
+      </form>
+    </section>
+  </div>
+
+  <div id="bulk-node-modal" class="modal-layer" hidden>
+    <section class="modal wide" role="dialog" aria-modal="true" aria-labelledby="bulk-node-modal-title">
+      <div class="modal-head"><div><h3 id="bulk-node-modal-title">批量添加节点</h3><p>单次最多 500 个；任一行无效时整批不导入</p></div><button class="button icon ghost" type="button" data-close="bulk-node-modal" aria-label="关闭">×</button></div>
+      <form id="bulk-node-form">
+        <div class="modal-body">
+          <div class="field"><label for="bulk-node-input">节点列表</label><textarea id="bulk-node-input" required autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="# 每行一种格式&#10;socks5h://user:pass@host:port&#10;美西固定 01 | http://user:pass@host:port | 20 | fixed&#10;轮换池 01 | socks5h://user:pass@host:port | 50 | pool"></textarea><p id="bulk-node-summary" class="help">格式：代理 URL，或 名称 | 代理 URL | 容量 | fixed/pool；空行和 # 注释会忽略</p></div>
+        </div>
+        <div class="modal-actions"><button class="button" type="button" data-close="bulk-node-modal">取消</button><button id="import-nodes" class="button primary" type="submit">导入节点</button></div>
       </form>
     </section>
   </div>
@@ -438,6 +452,18 @@
       if (left < 60) return left + ' 秒后复测';
       return Math.ceil(left / 60) + ' 分钟后复测';
     }
+    function nextObservation(node, guard) {
+      const cfg = state.status?.config || {};
+      if (guard.disabled_by_guard) return quarantineCountdown(guard) || '等待隔离复测';
+      if (cfg.mode === 'passive') return '随下一次请求更新';
+      const interval = Number(cfg.active_interval_seconds || 0);
+      const last = Number(guard.last_probe_at || 0);
+      if (!interval || !last) return cfg.mode === 'active' || cfg.mode === 'hybrid' ? '等待主动检测' : '随下一次请求更新';
+      const left = Math.max(0, Math.round(last + interval - Date.now() / 1000));
+      if (left === 0) return '主动检测待执行';
+      if (left < 60) return left + ' 秒后主动检测';
+      return Math.ceil(left / 60) + ' 分钟后主动检测';
+    }
     function actionButtons(node) {
       return '<div class="row-actions">' +
         '<button class="button" type="button" data-action="quality" title="真实模型质量检测">质量</button>' +
@@ -474,7 +500,7 @@
           '<td class="numeric ' + tpsClass + '">' + (observed ? Number(guard.last_output_tps || 0).toFixed(1) : '-') + '</td>' +
           '<td class="numeric">' + (guard.last_first_token_ms ? number(guard.last_first_token_ms) + ' ms' : '-') + '</td>' +
           '<td><div>' + number(node.assignedAccountCount) + ' / ' + (node.accountCapacity || '∞') + '</div><div class="subtext">已绑定 / 容量</div></td>' +
-          '<td title="' + esc(time(observed, true)) + '">' + relative(observed) + '<div class="subtext">' + esc(guard.last_source || '-') + '</div></td>' +
+          '<td title="' + esc(time(observed, true)) + '">' + relative(observed) + '<div class="subtext" title="' + esc(nextObservation(node, guard)) + '">' + esc(nextObservation(node, guard)) + '</div></td>' +
           '<td class="actions-col">' + actionButtons(node) + '</td></tr>';
       }).join('');
       $('node-cards').innerHTML = nodes.map((node) => {
@@ -521,8 +547,15 @@
       const values = [['模式',modeName(cfg.mode)],['主动间隔',cfg.active_interval_seconds + ' 秒'],['被动轮询',cfg.passive_poll_seconds + ' 秒'],['软 / 硬阈值',cfg.soft_tps + ' / ' + cfg.hard_tps],['连续异常',cfg.consecutive_soft + ' / ' + cfg.consecutive_errors],['隔离复测',cfg.quarantine_seconds + ' 秒'],['最低健康节点',cfg.min_healthy_nodes],['模型',cfg.model]];
       $('policy-view').innerHTML = values.map((value) => '<div><dt>' + value[0] + '</dt><dd>' + esc(value[1]) + '</dd></div>').join('');
     }
-    function openModal(id) { $(id).hidden = false; document.body.style.overflow = 'hidden'; $(id).querySelector('input,select,button')?.focus(); }
-    function closeModal(id) { $(id).hidden = true; document.body.style.overflow = ''; }
+    function openModal(id) { $(id).hidden = false; document.body.style.overflow = 'hidden'; $(id).querySelector('input,select,textarea,button')?.focus(); }
+    function closeModal(id) {
+      $(id).hidden = true;
+      document.body.style.overflow = '';
+      if (id === 'bulk-node-modal') {
+        $('bulk-node-input').value = '';
+        $('bulk-node-summary').textContent = '格式：代理 URL，或 名称 | 代理 URL | 容量 | fixed/pool；空行和 # 注释会忽略';
+      }
+    }
     function openNode(node = null) {
       state.editing = node;
       $('node-modal-title').textContent = node ? '编辑节点' : '添加节点';
@@ -541,6 +574,42 @@
       $('policy-quarantine').value = cfg.quarantine_seconds; $('policy-soft').value = cfg.soft_tps; $('policy-hard').value = cfg.hard_tps;
       $('policy-soft-count').value = cfg.consecutive_soft; $('policy-error-count').value = cfg.consecutive_errors; $('policy-min-healthy').value = cfg.min_healthy_nodes;
       openModal('policy-modal');
+    }
+    function parseBulkNodes(raw) {
+      const items = [];
+      const errors = [];
+      raw.split(/\r?\n/).forEach((source, index) => {
+        const line = source.trim();
+        if (!line || line.startsWith('#') || line.startsWith('//')) return;
+        const parts = line.split('|').map((part) => part.trim());
+        let name = '';
+        let proxyURL = '';
+        let capacity = 0;
+        let proxyPool = false;
+        if (parts.length === 1) {
+          proxyURL = parts[0];
+        } else if (parts.length >= 2 && parts.length <= 4) {
+          [name, proxyURL] = parts;
+          if (parts[2]) {
+            capacity = Number(parts[2]);
+            if (!Number.isInteger(capacity) || capacity < 0 || capacity > 100000) errors.push('第 ' + (index + 1) + ' 行容量需为 0 到 100000 的整数');
+          }
+          if (parts[3]) {
+            const type = parts[3].toLowerCase();
+            if (type !== 'fixed' && type !== 'pool') errors.push('第 ' + (index + 1) + ' 行类型只能是 fixed 或 pool');
+            proxyPool = type === 'pool';
+          }
+        } else {
+          errors.push('第 ' + (index + 1) + ' 行字段数量不正确');
+          return;
+        }
+        if (!proxyURL) errors.push('第 ' + (index + 1) + ' 行缺少代理 URL');
+        items.push({name, proxyURL, accountCapacity:capacity, proxyPool, enabled:true});
+      });
+      if (!items.length) errors.push('没有可导入的节点');
+      if (items.length > 500) errors.push('单次最多导入 500 个节点');
+      if (errors.length) throw new Error(errors[0] + (errors.length > 1 ? '（另有 ' + (errors.length - 1) + ' 处错误）' : ''));
+      return items;
     }
     function confirmAction(title, message, action) {
       $('confirm-title').textContent = title; $('confirm-message').textContent = message; state.confirm = action; openModal('confirm-modal');
@@ -599,6 +668,15 @@
     });
     $('node-search').addEventListener('input', (event) => { state.search = event.target.value; renderNodes(); });
     $('add-node').addEventListener('click', () => openNode());
+    $('bulk-add-node').addEventListener('click', () => openModal('bulk-node-modal'));
+    $('bulk-node-input').addEventListener('input', (event) => {
+      try {
+        const count = parseBulkNodes(event.target.value).length;
+        $('bulk-node-summary').textContent = '已识别 ' + count + ' 个节点；保存后代理 URL 不会回显';
+      } catch (error) {
+        $('bulk-node-summary').textContent = error.message;
+      }
+    });
     $('rebalance-nodes').addEventListener('click', async (event) => {
       const button = event.currentTarget;
       busy(button, true);
@@ -651,6 +729,22 @@
       } catch (error) { toast(error.message, 'error'); }
       finally { busy(button, false); }
     });
+    $('bulk-node-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const button = $('import-nodes');
+      let items;
+      try { items = parseBulkNodes($('bulk-node-input').value); }
+      catch (error) { toast(error.message, 'error'); return; }
+      busy(button, true);
+      try {
+        const result = await api('/nodes/import', {method:'POST', body:{items}});
+        const created = Number(result.created ?? result.data?.created ?? items.length);
+        closeModal('bulk-node-modal');
+        toast('已导入 ' + created + ' 个节点');
+        await load(true);
+      } catch (error) { toast(error.message, 'error'); }
+      finally { busy(button, false); }
+    });
     $('policy-form').addEventListener('submit', async (event) => {
       event.preventDefault();
       const button = $('save-policy');
@@ -663,7 +757,7 @@
     });
     document.addEventListener('click', (event) => { const close = event.target.closest('[data-close]'); if (close) closeModal(close.dataset.close); });
     $('confirm-action').addEventListener('click', () => { if (state.confirm) state.confirm($('confirm-action')); });
-    document.addEventListener('keydown', (event) => { if (event.key === 'Escape') ['node-modal','policy-modal','confirm-modal','accounts-modal'].forEach((id) => { if (!$(id).hidden) closeModal(id); }); });
+    document.addEventListener('keydown', (event) => { if (event.key === 'Escape') ['node-modal','bulk-node-modal','policy-modal','confirm-modal','accounts-modal'].forEach((id) => { if (!$(id).hidden) closeModal(id); }); });
     const savedTheme = localStorage.getItem('grok2api-egress-theme');
     document.documentElement.dataset.theme = savedTheme || (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
     load();

@@ -1,0 +1,66 @@
+name: CPA plugin release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    if: startsWith(github.ref_name, 'v1.')
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cpa-plugin/go
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: cpa-plugin/go/go.mod
+          cache-dependency-path: cpa-plugin/go/go.sum
+
+      - name: Install cross compiler
+        run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu zip
+        working-directory: .
+
+      - name: Verify tag and test
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          grep -Eq "pluginVersion[[:space:]]*= \"${version}\"" main.go
+          go test ./...
+
+      - name: Build release archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${GITHUB_REF_NAME#v}"
+          dist="${GITHUB_WORKSPACE}/dist"
+          mkdir -p "${dist}/linux_amd64" "${dist}/linux_arm64"
+
+          CGO_ENABLED=1 GOOS=linux GOARCH=amd64 CC=gcc \
+            go build -buildvcs=false -buildmode=c-shared -trimpath \
+            -o "${dist}/linux_amd64/grok2api-egress.so" .
+          CGO_ENABLED=1 GOOS=linux GOARCH=arm64 CC=aarch64-linux-gnu-gcc \
+            go build -buildvcs=false -buildmode=c-shared -trimpath \
+            -o "${dist}/linux_arm64/grok2api-egress.so" .
+
+          cd "${dist}/linux_amd64"
+          zip -q "${dist}/grok2api-egress_${version}_linux_amd64.zip" grok2api-egress.so
+          cd "${dist}/linux_arm64"
+          zip -q "${dist}/grok2api-egress_${version}_linux_arm64.zip" grok2api-egress.so
+          cd "${dist}"
+          sha256sum grok2api-egress_*.zip > checksums.txt
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/grok2api-egress_*.zip
+            dist/checksums.txt

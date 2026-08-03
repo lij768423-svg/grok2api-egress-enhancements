@@ -75,7 +75,7 @@ import (
 
 const (
 	pluginName          = "grok2api-egress"
-	pluginVersion       = "1.0.3"
+	pluginVersion       = "1.0.4"
 	resourcePath        = "/status"
 	managementAPIPath   = "/v0/management/grok2api-egress/api"
 	resourceContentType = "text/html; charset=utf-8"
@@ -441,6 +441,59 @@ func dispatchAPI(method, path string, query url.Values, body json.RawMessage) ([
 				_ = store.setBatchEnabled(ids, v)
 			}
 			return managementJSON(http.StatusOK, map[string]any{"ok": true})
+		}
+
+	case path == "/nodes/import":
+		if method == http.MethodPost {
+			var raw struct {
+				Items []map[string]any `json:"items"`
+			}
+			if err := json.Unmarshal(body, &raw); err != nil {
+				return managementJSON(http.StatusBadRequest, errMsg("invalidBody", "批量节点数据无效"))
+			}
+			if len(raw.Items) == 0 || len(raw.Items) > 500 {
+				return managementJSON(http.StatusBadRequest, errMsg("invalidBody", "单次需导入 1 到 500 个节点"))
+			}
+			inputs := make([]nodeCreateInput, 0, len(raw.Items))
+			for index, item := range raw.Items {
+				name, _ := item["name"].(string)
+				proxy, _ := item["proxyURL"].(string)
+				if proxy == "" {
+					proxy, _ = item["proxy_url"].(string)
+				}
+				if strings.TrimSpace(name) == "" {
+					name = fmt.Sprintf("Node %03d", index+1)
+				}
+				enabled := true
+				if value, ok := item["enabled"].(bool); ok {
+					enabled = value
+				}
+				pool, _ := item["proxyPool"].(bool)
+				if !pool {
+					pool, _ = item["proxy_pool"].(bool)
+				}
+				inputs = append(inputs, nodeCreateInput{
+					Name:            name,
+					ProxyURL:        proxy,
+					Enabled:         enabled,
+					ProxyPool:       pool,
+					AccountCapacity: intPick(item, 0, "accountCapacity", "account_capacity"),
+				})
+			}
+			created, err := store.createNodes(inputs)
+			if err != nil {
+				return managementJSON(http.StatusBadRequest, errMsg("importFailed", err.Error()))
+			}
+			items := make([]map[string]any, 0, len(created))
+			for _, node := range created {
+				items = append(items, publicNode(node))
+			}
+			return managementJSON(http.StatusOK, map[string]any{
+				"ok":      true,
+				"data":    map[string]any{"items": items, "created": len(items)},
+				"items":   items,
+				"created": len(items),
+			})
 		}
 
 	case path == "/nodes/test":

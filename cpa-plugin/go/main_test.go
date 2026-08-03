@@ -70,9 +70,29 @@ func TestStoreNodeCRUD(t *testing.T) {
 	}
 }
 
+func TestStoreCreateNodesIsAllOrNothing(t *testing.T) {
+	s := newStateStore(filepath.Join(t.TempDir(), "state.json"))
+	created, err := s.createNodes([]nodeCreateInput{
+		{Name: "a", ProxyURL: "http://127.0.0.1:7951", Enabled: true, AccountCapacity: 100},
+		{Name: "b", ProxyURL: "http://127.0.0.1:7952", Enabled: true, ProxyPool: true, AccountCapacity: 120},
+	})
+	if err != nil || len(created) != 2 || len(s.listNodes()) != 2 {
+		t.Fatalf("created=%d nodes=%d err=%v", len(created), len(s.listNodes()), err)
+	}
+	if _, err := s.createNodes([]nodeCreateInput{
+		{Name: "valid", ProxyURL: "http://127.0.0.1:7953", Enabled: true},
+		{Name: "invalid", ProxyURL: "", Enabled: true},
+	}); err == nil {
+		t.Fatal("expected invalid import to fail")
+	}
+	if len(s.listNodes()) != 2 {
+		t.Fatal("invalid batch must not create partial nodes")
+	}
+}
+
 func TestRenderStatusPage(t *testing.T) {
 	page := strings.Replace(pageTemplate, "/*__HALLMARK_TOKENS__*/", tokenCSS, 1)
-	for _, want := range []string{"出口守护", "纯 CPA", "data-batch=\"enable\"", "重平衡账号", "X-Grok2API-Egress-UI"} {
+	for _, want := range []string{"出口守护", "纯 CPA", "data-batch=\"enable\"", "重平衡账号", "批量添加", "/nodes/import", "页面每 15 秒刷新", "X-Grok2API-Egress-UI"} {
 		if !strings.Contains(page, want) {
 			t.Fatalf("missing %q", want)
 		}
@@ -113,5 +133,35 @@ func TestDispatchNodesList(t *testing.T) {
 	}
 	if !strings.Contains(string(resp.Body), `"name":"a"`) {
 		t.Fatalf("body %s", resp.Body)
+	}
+}
+
+func TestDispatchNodesImportRedactsProxyURLs(t *testing.T) {
+	store = newStateStore(filepath.Join(t.TempDir(), "s.json"))
+	headers := make(http.Header)
+	headers.Set("X-Grok2API-Egress-UI", "1")
+	requestBody, _ := json.Marshal(map[string]any{
+		"items": []map[string]any{
+			{"name": "fixed-a", "proxyURL": "http://user:pass@127.0.0.1:7951", "accountCapacity": 100},
+			{"proxy_url": "http://user:pass@127.0.0.1:7952", "proxy_pool": true},
+		},
+	})
+	body, _ := json.Marshal(uiProxyRequest{Method: http.MethodPost, Path: "/nodes/import", Body: requestBody})
+	raw, err := handleUIProxy(managementRequest{Method: http.MethodPost, Headers: headers, Body: body})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var env envelope
+	_ = json.Unmarshal(raw, &env)
+	var resp managementResponse
+	_ = json.Unmarshal(env.Result, &resp)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(resp.Body), `"created":2`) {
+		t.Fatalf("status=%d body=%s", resp.StatusCode, resp.Body)
+	}
+	if strings.Contains(string(resp.Body), "user:pass") || strings.Contains(string(resp.Body), "proxy_url") {
+		t.Fatalf("response leaked proxy URL: %s", resp.Body)
+	}
+	if len(store.listNodes()) != 2 {
+		t.Fatalf("node count=%d", len(store.listNodes()))
 	}
 }

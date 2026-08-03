@@ -13,7 +13,7 @@ grok2api-egress-enhancements/
 │   ├── loadtest/
 │   └── import_from_g2a.py
 ├── LICENSE               # 仓库根目录许可证
-└── .github/workflows/build.yml   # 可选
+└── .github/workflows/cpa-plugin-release.yml
 ```
 
 Go module 当前：`github.com/lij768423-svg/cpa-plugin-grok2api-egress`。
@@ -39,7 +39,7 @@ Go module 当前：`github.com/lij768423-svg/cpa-plugin-grok2api-egress`。
 4. 两个假节点（可都是 `http://127.0.0.1:7890` 做 UI 演示）
 5. 截图：节点表、隔离倒计时、事件流（打码 token）
 
-## 4. 版本与变更摘要（1.0.3）
+## 4. 版本与变更摘要（1.0.4）
 
 - 纯 CPA 插件，无 Grok2API 运行时依赖
 - 节点 CRUD + 粘性 `proxy_url` 绑定 + rebalance
@@ -49,6 +49,7 @@ Go module 当前：`github.com/lij768423-svg/cpa-plugin-grok2api-egress`。
 - auth→node 映射缓存 + 未映射 hard fallback
 - 短生成窗口 / 小输出防误 hard
 - 管理 UI 完整中文台
+- 逐行批量导入节点（1-500 条、原子写入、代理 URL 不回显）
 - loadtest + monitor 脚本
 
 ## 5. 已知问题（诚实写进 README / Issues）
@@ -70,6 +71,8 @@ go build -buildmode=c-shared -o /tmp/grok2api-egress.so .
 # 3. 检查敏感文件后提交并推送分支
 git diff --check
 git status --short
+
+# 4. 合并后打 v1.0.4 tag；Release workflow 产出两种 Linux 架构和 checksums.txt
 ```
 
 ## 7. 一句话 Pitch（README / Release）

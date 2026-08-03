@@ -41,7 +41,9 @@ Current baseline:
 
 ### CPA-native egress guard plugin
 
-`cpa-plugin/` is now the **v1.0.3 pure-CPA plugin**. It has no runtime dependency on Grok2API: it uses CPA Host APIs for auth files and usage events, binds `proxy_url` stickily to egress nodes, and provides node CRUD, batch operations, connectivity/real-model tests, quarantine migration, hot-reloadable policy, statistics, events, and light/dark themes. See [cpa-plugin/README.md](./cpa-plugin/README.md) for build instructions and the Chinese [AI deployment and operations guide](./cpa-plugin/AI_USAGE_GUIDE.md) for proxy topology, capacity planning, quarantine recovery, and forced residential-IP rotation.
+`cpa-plugin/` is now the **v1.0.4 pure-CPA plugin**. It has no runtime dependency on Grok2API: it uses CPA Host APIs for auth files and usage events, binds `proxy_url` stickily to egress nodes, and provides node CRUD, line-based bulk import, batch operations, connectivity/real-model tests, quarantine migration, hot-reloadable policy, statistics, events, and light/dark themes. See [cpa-plugin/README.md](./cpa-plugin/README.md) for build instructions and the Chinese [AI deployment and operations guide](./cpa-plugin/AI_USAGE_GUIDE.md) for proxy topology, capacity planning, quarantine recovery, and forced residential-IP rotation.
+
+CPA itself does not degrade model quality. This optional plugin acts as an egress circuit breaker for multi-account, multi-egress deployments; single-account or stable static-proxy installations may not need it.
 
 The quality guard is a heuristic circuit breaker, not proof that upstream model capability changed. Immediate hard quarantine is intentionally aggressive; raise `hard_tps` when false positives are more costly. Soft anomalies still require confirmation probes.
 

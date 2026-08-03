@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 )
@@ -54,6 +55,14 @@ type nodeRecord struct {
 	UpdatedAt            time.Time `json:"updated_at"`
 }
 
+type nodeCreateInput struct {
+	Name            string
+	ProxyURL        string
+	Enabled         bool
+	ProxyPool       bool
+	AccountCapacity int
+}
+
 type guardEvent struct {
 	TS             float64 `json:"ts"`
 	Event          string  `json:"event"`
@@ -66,12 +75,12 @@ type guardEvent struct {
 }
 
 type probeStats struct {
-	Total         int64 `json:"total"`
-	Healthy       int64 `json:"healthy"`
-	Soft          int64 `json:"soft"`
-	Hard          int64 `json:"hard"`
-	Errors        int64 `json:"errors"`
-	OutputTokens  int64 `json:"output_tokens"`
+	Total        int64 `json:"total"`
+	Healthy      int64 `json:"healthy"`
+	Soft         int64 `json:"soft"`
+	Hard         int64 `json:"hard"`
+	Errors       int64 `json:"errors"`
+	OutputTokens int64 `json:"output_tokens"`
 }
 
 type actionStats struct {
@@ -88,13 +97,13 @@ type statistics struct {
 }
 
 type guardState struct {
-	Version  int                    `json:"version"`
-	Policy   policyConfig           `json:"policy"`
-	Nodes    map[string]*nodeRecord `json:"nodes"`
-	Events   []guardEvent           `json:"events"`
-	Stats    statistics             `json:"statistics"`
-	NextID   int                    `json:"next_id"`
-	UpdatedAt float64               `json:"updated_at"`
+	Version   int                    `json:"version"`
+	Policy    policyConfig           `json:"policy"`
+	Nodes     map[string]*nodeRecord `json:"nodes"`
+	Events    []guardEvent           `json:"events"`
+	Stats     statistics             `json:"statistics"`
+	NextID    int                    `json:"next_id"`
+	UpdatedAt float64                `json:"updated_at"`
 }
 
 type stateStore struct {
@@ -264,32 +273,70 @@ func (s *stateStore) getNode(id string) (*nodeRecord, bool) {
 }
 
 func (s *stateStore) createNode(name, proxyURL string, enabled, pool bool, capacity int) (*nodeRecord, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if name == "" || proxyURL == "" {
-		return nil, fmt.Errorf("名称和代理 URL 必填")
-	}
-	id := fmt.Sprintf("%d", s.data.NextID)
-	s.data.NextID++
-	now := time.Now().UTC()
-	n := &nodeRecord{
-		ID:              id,
+	created, err := s.createNodes([]nodeCreateInput{{
 		Name:            name,
 		ProxyURL:        proxyURL,
-		ProxyURLStored:  proxyURL,
 		Enabled:         enabled,
 		ProxyPool:       pool,
 		AccountCapacity: capacity,
-		ProbeStatus:     "unknown",
-		CreatedAt:       now,
-		UpdatedAt:       now,
-	}
-	s.data.Nodes[id] = n
-	if err := s.persistLocked(); err != nil {
+	}})
+	if err != nil {
 		return nil, err
 	}
-	cp := *n
-	return &cp, nil
+	return created[0], nil
+}
+
+func (s *stateStore) createNodes(inputs []nodeCreateInput) ([]*nodeRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(inputs) == 0 {
+		return nil, fmt.Errorf("至少提供一个节点")
+	}
+	if len(inputs) > 500 {
+		return nil, fmt.Errorf("单次最多导入 500 个节点")
+	}
+	for index := range inputs {
+		inputs[index].Name = strings.TrimSpace(inputs[index].Name)
+		inputs[index].ProxyURL = strings.TrimSpace(inputs[index].ProxyURL)
+		if inputs[index].Name == "" || inputs[index].ProxyURL == "" {
+			return nil, fmt.Errorf("第 %d 个节点缺少名称或代理 URL", index+1)
+		}
+		if inputs[index].AccountCapacity < 0 || inputs[index].AccountCapacity > 100000 {
+			return nil, fmt.Errorf("第 %d 个节点容量需在 0 到 100000 之间", index+1)
+		}
+	}
+	previousNextID := s.data.NextID
+	now := time.Now().UTC()
+	created := make([]*nodeRecord, 0, len(inputs))
+	createdIDs := make([]string, 0, len(inputs))
+	for _, input := range inputs {
+		id := fmt.Sprintf("%d", s.data.NextID)
+		s.data.NextID++
+		n := &nodeRecord{
+			ID:              id,
+			Name:            input.Name,
+			ProxyURL:        input.ProxyURL,
+			ProxyURLStored:  input.ProxyURL,
+			Enabled:         input.Enabled,
+			ProxyPool:       input.ProxyPool,
+			AccountCapacity: input.AccountCapacity,
+			ProbeStatus:     "unknown",
+			CreatedAt:       now,
+			UpdatedAt:       now,
+		}
+		s.data.Nodes[id] = n
+		createdIDs = append(createdIDs, id)
+		cp := *n
+		created = append(created, &cp)
+	}
+	if err := s.persistLocked(); err != nil {
+		for _, id := range createdIDs {
+			delete(s.data.Nodes, id)
+		}
+		s.data.NextID = previousNextID
+		return nil, err
+	}
+	return created, nil
 }
 
 func (s *stateStore) updateNode(id string, mut func(*nodeRecord) error) (*nodeRecord, error) {
@@ -411,30 +458,30 @@ func publicNode(n *nodeRecord) map[string]any {
 		return nil
 	}
 	return map[string]any{
-		"id":                     n.ID,
-		"name":                   n.Name,
-		"enabled":                n.Enabled,
-		"proxyPool":              n.ProxyPool,
-		"accountCapacity":        n.AccountCapacity,
-		"exitIp":                 n.ExitIP,
-		"probeStatus":            n.ProbeStatus,
-		"probeLatencyMs":         n.ProbeLatencyMs,
-		"assignedAccountCount":   n.AssignedAccountCount,
-		"disabled_by_guard":      n.DisabledByGuard,
-		"quarantined_until":      n.QuarantinedUntil,
-		"error_strikes":          n.ErrorStrikes,
-		"soft_strikes":           n.SoftStrikes,
-		"last_classification":    n.LastClassification,
-		"last_output_tps":        n.LastOutputTPS,
-		"last_first_token_ms":    n.LastFirstTokenMs,
-		"last_duration_ms":       n.LastDurationMs,
-		"last_output_tokens":     n.LastOutputTokens,
-		"last_reason":            n.LastReason,
-		"last_source":            n.LastSource,
-		"last_observed_at":       n.LastObservedAt,
-		"last_probe_at":          n.LastProbeAt,
-		"hasProxy":               n.ProxyURL != "",
-		"createdAt":              n.CreatedAt,
-		"updatedAt":              n.UpdatedAt,
+		"id":                   n.ID,
+		"name":                 n.Name,
+		"enabled":              n.Enabled,
+		"proxyPool":            n.ProxyPool,
+		"accountCapacity":      n.AccountCapacity,
+		"exitIp":               n.ExitIP,
+		"probeStatus":          n.ProbeStatus,
+		"probeLatencyMs":       n.ProbeLatencyMs,
+		"assignedAccountCount": n.AssignedAccountCount,
+		"disabled_by_guard":    n.DisabledByGuard,
+		"quarantined_until":    n.QuarantinedUntil,
+		"error_strikes":        n.ErrorStrikes,
+		"soft_strikes":         n.SoftStrikes,
+		"last_classification":  n.LastClassification,
+		"last_output_tps":      n.LastOutputTPS,
+		"last_first_token_ms":  n.LastFirstTokenMs,
+		"last_duration_ms":     n.LastDurationMs,
+		"last_output_tokens":   n.LastOutputTokens,
+		"last_reason":          n.LastReason,
+		"last_source":          n.LastSource,
+		"last_observed_at":     n.LastObservedAt,
+		"last_probe_at":        n.LastProbeAt,
+		"hasProxy":             n.ProxyURL != "",
+		"createdAt":            n.CreatedAt,
+		"updatedAt":            n.UpdatedAt,
 	}
 }

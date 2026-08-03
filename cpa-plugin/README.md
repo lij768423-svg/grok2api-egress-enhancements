@@ -8,7 +8,7 @@
 | | |
 |---|---|
 | 插件名 | `grok2api-egress` |
-| 当前版本 | **1.0.3** |
+| 当前版本 | **1.0.4** |
 | 语言 | Go (`-buildmode=c-shared` → `.so`) |
 | CPA SDK | `CLIProxyAPI/v7` (`pluginabi` / `pluginapi`) |
 | 能力 | Management UI + Usage Plugin |
@@ -32,6 +32,8 @@
 - 提供完整 **管理 UI**（节点 CRUD、批量、重平衡、质量测试、策略、事件）
 
 灵感来自 Grok2API 侧的 quality-guard / egress 思路，但实现已完全 native 化，**不需要、也不连接 Grok2API**。
+
+**CPA 本身不会导致模型降智。** 本插件是多账号、多出口场景下的可选熔断器；如果只有单账号或稳定静态代理，没有出口轮换和迁号需求，可以不安装。
 
 ---
 
@@ -74,6 +76,7 @@
 | 能力 | 说明 |
 |---|---|
 | CRUD | 名称、proxy URL、启用、容量、是否参与池 |
+| 批量导入 | 单行代理 URL，或 `名称 | 代理 URL | 容量 | fixed/pool`；最多 500 条、整批原子写入 |
 | 连通性测试 | 经该出口探测外网出口 IP / 延迟 |
 | 质量测试 | 真实 chat 探测，计算 output Token/s |
 | 绑定账号 | 查看粘在该节点 `proxy_url` 上的账号列表 |
@@ -128,6 +131,7 @@
 - 节点表：状态徽章、TPS、出口 IP、绑定数、隔离倒计时
 - 行内：连通测试 / 质量测试 / 编辑 / 绑定账号 / 启停
 - 策略表单、事件时间线、一键重平衡
+- 单条添加与逐行批量导入；保存后的代理 URL 不读取、不回显
 
 UI 经 management 代理，请求头需 `X-Grok2API-Egress-UI: 1`（页面已内置）。
 
@@ -177,6 +181,18 @@ go build -buildmode=c-shared -o grok2api-egress.so .
 
 ## 安装（CPA）
 
+### 插件商店（推荐）
+
+在 CPA 管理中心打开插件商店，搜索 **Grok Egress Guard** 或插件 ID
+`grok2api-egress`，选择与 CPA 主机架构一致的版本安装。发布包提供
+`linux/amd64` 和 `linux/arm64`；商店会从 GitHub Release 下载并校验
+`checksums.txt`。升级时在同一条目选择新版本即可，状态文件不会随插件二进制覆盖。
+
+如果商店暂未收录，可从仓库最新 Release 下载对应 zip，校验
+`checksums.txt` 后按下面的手动方式安装。
+
+### 手动安装
+
 1. 复制插件：
 
 ```bash
@@ -208,6 +224,16 @@ state_file: /CLIProxyAPI/plugin-data/egress-guard/state.json
    - `http://127.0.0.1:7952`
    - `http://127.0.0.1:7953`
    （CPA 若用 host 网络，可直接打本机 sticky 代理端口。）
+
+   多个节点可点 **「批量添加」**，每行使用以下任一格式：
+
+   ```text
+   socks5h://user:pass@host:port
+   美西固定 01 | http://user:pass@host:port | 20 | fixed
+   轮换池 01 | socks5h://user:pass@host:port | 50 | pool
+   ```
+
+   空行以及 `#`、`//` 开头的注释会忽略。任一行无效时整批拒绝，不会留下部分节点；导入完成后 API 和页面都不会回显代理 URL。
 
 2. **连通测试** → 确认 `exit_ip` 各不相同（真正粘在不同出口）。
 
@@ -247,6 +273,7 @@ Content-Type: application/json
 | `/status` | GET | 总览、节点 map、策略、事件、统计 |
 | `/policy` | GET/PUT | 读写守护策略 |
 | `/nodes` | GET/POST/DELETE | 列表 / 创建 / 批量删 |
+| `/nodes/import` | POST | 原子批量创建 1-500 个节点；代理 URL 不回显 |
 | `/nodes/batch` | PATCH | 批量启停 |
 | `/nodes/test` | POST | 批量连通测试 |
 | `/nodes/rebalance` | POST | 账号重平衡 |
@@ -345,7 +372,7 @@ CPA_LOADTEST_LOG_DIR=/var/log/cpa-loadtest \
 - [ ] 修复 sticky-q（healthy 与 quarantined 标志长期不一致）
 - [ ] 事件/统计按时间窗滑动，避免历史 5xx 永久污染告警
 - [ ] 节点维度的成功率 SLO 与自动扩缩绑定
-- [ ] CI：`go test` + 多架构 `.so` release
+- [x] CI：`go test` + Linux amd64/arm64 `.so` release
 - [ ] 英文 UI / i18n
 - [ ] 补 SPDX License
 

@@ -1,6 +1,8 @@
 # CPA 出口守护 AI 部署与运维指南
 
-本文用于让 AI 工具或运维人员从零部署、配置和维护 `grok2api-egress` v1.0.3。插件是纯 CPA 原生实现，只读写 CLIProxyAPI（下称 CPA）的 xAI auth 文件和 Usage 事件，不依赖 Grok2API 运行时。
+本文用于让 AI 工具或运维人员从零部署、配置和维护 `grok2api-egress` v1.0.4。插件是纯 CPA 原生实现，只读写 CLIProxyAPI（下称 CPA）的 xAI auth 文件和 Usage 事件，不依赖 Grok2API 运行时。
+
+CPA 本身不会导致模型降智。这个插件只是在多账号、多出口场景中把 Token/s 等信号用作出口熔断依据；单账号或稳定静态代理部署可以不启用。
 
 > 安全边界：不要把真实代理用户名、密码、CPA 管理密钥、xAI token、`state.json` 或生产日志交给 AI。示例里的 `<...>` 都必须在本机私密配置中替换，不能提交到 Git。
 
@@ -207,7 +209,7 @@ http://127.0.0.1:7953
 
 ### 3.3 固定代理与“代理池模式”
 
-UI 中的“固定代理/代理池”在 v1.0.3 主要是节点元数据：
+UI 中的“固定代理/代理池”在 v1.0.4 主要是节点元数据：
 
 - 固定住宅/静态 ISP：关闭“代理池模式”；
 - 上游 URL 每次建立新连接就会轮换出口：可开启“代理池模式”作为标记；
@@ -216,6 +218,8 @@ UI 中的“固定代理/代理池”在 v1.0.3 主要是节点元数据：
 当前纯 CPA 插件不会因为开启“代理池模式”就自动改用户名、调用换 IP API 或创建新会话。是否真的换 IP，由上游代理或本地侧车决定，最终必须以连通检测返回的 `exit_ip` 为准。
 
 ## 4. 构建和安装插件
+
+优先在 CPA 管理中心的插件商店搜索 `grok2api-egress` 或 **Grok Egress Guard**。商店安装会自动选择 GitHub Release 中与主机匹配的 Linux amd64/arm64 包并校验 SHA256。商店尚未收录或需要本地调试时，再使用下面的源码构建流程。
 
 要求：Go 1.22+、CGO、C 编译器，构建环境的架构和 libc 必须与 CPA 运行环境兼容。
 
@@ -265,7 +269,19 @@ cp <CPA_PLUGIN_DATA_DIR>/egress-guard/state.json \
 
 代理 URL 属于敏感数据。`state.json` 中会保存完整 URL，状态目录必须使用最小权限，不应通过 Web、备份分享或 Issue 附件公开。
 
-### 5.2 准备 CPA xAI auth
+### 5.2 批量添加节点
+
+点击“批量添加”，每行可只填代理 URL，也可完整填写：
+
+```text
+socks5h://user:pass@host:port
+US-A | http://user:pass@host:port | 80 | fixed
+US-Pool-A | socks5h://user:pass@host:port | 120 | pool
+```
+
+字段依次为 `名称 | 代理 URL | 账号容量 | 类型`，类型只能是 `fixed` 或 `pool`。空行以及 `#`、`//` 开头的注释会忽略，单次最多 500 个。只填 URL 时由服务端生成 `Node 001` 一类名称。导入是原子操作：任一行非法时整批拒绝；成功响应和后续列表只返回 `hasProxy`，不会回显提交过的代理 URL。导入后仍需逐节点执行连通检测并核对 `exit_ip`。
+
+### 5.3 准备 CPA xAI auth
 
 插件只处理 CPA Host API 能列出的 xAI auth。auth JSON 至少应由 CPA 正常识别，并包含可用的 `access_token`；插件会写入或修改：
 
@@ -295,7 +311,7 @@ python3 cpa-plugin/import_from_g2a.py \
 
 确认列表后去掉 `--dry-run`。默认脚本会在导入后禁用 Grok2API 源账号，避免同一个 refresh token 被两端同时刷新。只有明确理解 token 互踢风险时才使用 `--skip-disable`。
 
-### 5.3 重平衡
+### 5.4 重平衡
 
 节点和账号都准备好后，点击“重平衡账号”。插件会：
 
@@ -531,7 +547,9 @@ curl --fail --silent --show-error \
 
 ### UI 状态看起来滞后
 
-auth 到代理的映射有短缓存，后台状态也按 30 秒周期扫描。先刷新页面和节点绑定数；仍异常时查看最近事件与 CPA 日志。不要在 CPA 运行中直接编辑 `state.json`。
+页面数据每 15 秒自动刷新，但“刷新显示”只读取当前快照，不会立即发起真实模型检测。节点状态的更新时间取决于策略：`passive` 随下一次映射到该节点的普通请求更新，`active` 按主动检测间隔更新，`hybrid` 取两者中先发生的一次；默认主动间隔是 1800 秒。节点表会显示预计的下一次主动检测或“随下一次请求更新”。需要立即确认时，使用节点行内的“质量”，不要为了让 UI 看起来更实时而盲目缩短主动间隔，否则会增加模型请求和住宅代理流量。
+
+auth 到代理的映射仍有短缓存，后台隔离复测最多受 worker 扫描周期影响。刷新后仍异常时查看最近事件与 CPA 日志。不要在 CPA 运行中直接编辑 `state.json`。
 
 ### 同时出现“检测成功”和“检测失败”
 
@@ -540,7 +558,7 @@ auth 到代理的映射有短缓存，后台状态也按 30 秒周期扫描。�
 ## 12. 给 AI 工具的推荐任务提示词
 
 ```text
-你正在部署 grok2api-egress-enhancements/cpa-plugin v1.0.3。
+你正在部署 grok2api-egress-enhancements/cpa-plugin v1.0.4。
 
 先阅读：
 1. cpa-plugin/README.md
