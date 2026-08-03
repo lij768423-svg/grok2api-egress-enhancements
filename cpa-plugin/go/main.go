@@ -75,7 +75,7 @@ import (
 
 const (
 	pluginName          = "grok2api-egress"
-	pluginVersion       = "1.0.4"
+	pluginVersion       = "1.0.5"
 	resourcePath        = "/status"
 	managementAPIPath   = "/v0/management/grok2api-egress/api"
 	resourceContentType = "text/html; charset=utf-8"
@@ -104,7 +104,11 @@ type lifecycleRequest struct {
 }
 
 type pluginConfig struct {
-	StateFile string `yaml:"state_file" json:"state_file"`
+	StateFile          string   `yaml:"state_file" json:"state_file"`
+	RotationURL        string   `yaml:"rotation_url" json:"rotation_url"`
+	RotationTokenEnv   string   `yaml:"rotation_token_env" json:"rotation_token_env"`
+	RotationTimeoutSec int      `yaml:"rotation_timeout_seconds" json:"rotation_timeout_seconds"`
+	RotatableNodeIDs   []string `yaml:"rotatable_node_ids" json:"rotatable_node_ids"`
 }
 
 type registration struct {
@@ -114,8 +118,10 @@ type registration struct {
 }
 
 type registrationCapabilities struct {
-	ManagementAPI bool `json:"management_api"`
-	UsagePlugin   bool `json:"usage_plugin"`
+	ManagementAPI      bool `json:"management_api"`
+	UsagePlugin        bool `json:"usage_plugin"`
+	Scheduler          bool `json:"scheduler"`
+	RequestInterceptor bool `json:"request_interceptor"`
 }
 
 type managementRegistration struct {
@@ -160,6 +166,9 @@ var (
 	workerCancel  context.CancelFunc
 	currentConfig atomic.Value // pluginConfig
 	startedAt     = time.Now().UTC()
+	// hostCall is replaceable in unit tests. Production always uses the C ABI
+	// callback implemented by callHost below.
+	hostCall = callHost
 )
 
 func main() {}
@@ -232,6 +241,12 @@ func handleMethod(method string, request []byte) ([]byte, error) {
 		return handleManagement(request)
 	case pluginabi.MethodUsageHandle:
 		return handleUsage(request)
+	case pluginabi.MethodSchedulerPick:
+		return handleSchedulerPick(request)
+	case pluginabi.MethodRequestInterceptBefore:
+		return handleRequestIntercept(request, false)
+	case pluginabi.MethodRequestInterceptAfter:
+		return handleRequestIntercept(request, true)
 	default:
 		return errorEnvelope("unknown_method", "unknown method: "+method), nil
 	}
@@ -252,6 +267,9 @@ func configure(raw []byte) error {
 	}
 	if strings.TrimSpace(cfg.StateFile) == "" {
 		cfg.StateFile = defaultStateFile
+	}
+	if cfg.RotationTimeoutSec <= 0 {
+		cfg.RotationTimeoutSec = 45
 	}
 	currentConfig.Store(cfg)
 	store = newStateStore(cfg.StateFile)
@@ -275,9 +293,13 @@ func pluginRegistration() registration {
 			GitHubRepository: "https://github.com/lij768423-svg/grok2api-egress-enhancements",
 			ConfigFields: []pluginapi.ConfigField{
 				{Name: "state_file", Type: pluginapi.ConfigFieldTypeString, Description: "出口守护状态文件路径（节点/策略/事件）"},
+				{Name: "rotation_url", Type: pluginapi.ConfigFieldTypeString, Description: "可选、受信任的内部换 IP Webhook；仅对 rotatable_node_ids 生效"},
+				{Name: "rotation_token_env", Type: pluginapi.ConfigFieldTypeString, Description: "从 CPA 进程环境变量读取 Webhook Bearer Token，避免写入配置"},
+				{Name: "rotation_timeout_seconds", Type: pluginapi.ConfigFieldTypeInteger, Description: "换 IP Webhook 超时（秒）"},
+				{Name: "rotatable_node_ids", Type: pluginapi.ConfigFieldTypeArray, Description: "允许自动换 IP 的节点 ID；留空时禁止自动换 IP"},
 			},
 		},
-		Capabilities: registrationCapabilities{ManagementAPI: true, UsagePlugin: true},
+		Capabilities: registrationCapabilities{ManagementAPI: true, UsagePlugin: true, Scheduler: true, RequestInterceptor: true},
 	}
 }
 
@@ -368,6 +390,9 @@ func dispatchAPI(method, path string, query url.Values, body json.RawMessage) ([
 			p.ConsecutiveSoft = intPick(raw, p.ConsecutiveSoft, "consecutive_soft", "consecutiveSoft")
 			p.ConsecutiveErrors = intPick(raw, p.ConsecutiveErrors, "consecutive_errors", "consecutiveErrors")
 			p.MinHealthyNodes = intPick(raw, p.MinHealthyNodes, "min_healthy_nodes", "minHealthyNodes")
+			p.MinGenerationMs = int64(intPick(raw, int(p.MinGenerationMs), "min_generation_ms", "minGenerationMs"))
+			p.MinOutputTokens = int64(intPick(raw, int(p.MinOutputTokens), "min_output_tokens", "minOutputTokens"))
+			p.MaxOutputTokensProbe = intPick(raw, p.MaxOutputTokensProbe, "max_output_tokens", "maxOutputTokens")
 			if v, ok := raw["model"].(string); ok && v != "" {
 				p.Model = v
 			}

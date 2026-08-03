@@ -39,24 +39,26 @@ Go module 当前：`github.com/lij768423-svg/cpa-plugin-grok2api-egress`。
 4. 两个假节点（可都是 `http://127.0.0.1:7890` 做 UI 演示）
 5. 截图：节点表、隔离倒计时、事件流（打码 token）
 
-## 4. 版本与变更摘要（1.0.4）
+## 4. 版本与变更摘要（1.0.5）
 
 - 纯 CPA 插件，无 Grok2API 运行时依赖
 - 节点 CRUD + 粘性 `proxy_url` 绑定 + rebalance
 - hybrid 质量守护：passive usage + active probe
-- hard/soft/error → quarantine → migrate → restore
+- hard/soft/明确传输错误 → quarantine → 同步摘除 → 迁移后 Host API 校验 → restore
 - 强制 xAI 探测头，多账号 401 重试
-- auth→node 映射缓存 + 未映射 hard fallback
+- auth→node 映射缓存（index / id / name / email / path）+ 未映射异常仅记录、不猜测隔离节点
 - 短生成窗口 / 小输出防误 hard
 - 管理 UI 完整中文台
 - 逐行批量导入节点（1-500 条、原子写入、代理 URL 不回显）
 - loadtest + monitor 脚本
+- CPA scheduler 跳过隔离/冷却账号 + 请求选中竞态 `503 Retry-After: 1`
+- 可选、节点白名单化的内部换 IP Webhook；新 IP 必须经真实模型复测
 
 ## 5. 已知问题（诚实写进 README / Issues）
 
-1. **Sticky quarantine 标志**：并发路径下可能出现 `cls=healthy` 且 `quarantined=true`；运维可清 state + rebalance。需状态机单一真源。
-2. **Monitor 历史 alerts**：累计 `many_5xx` / 旧 `node_quarantined` 事件会重复刷，应用 delta 而不是 lifetime。
-3. **短流量 hard 敏感**：默认 `hard_tps=1000` 对超短 reply 仍可能噪；已用 minGenMs 缓解，生产建议按模型调参。
+1. **Monitor 历史 alerts**：累计 `many_5xx` / 旧 `node_quarantined` 事件会重复刷，应用 delta 而不是 lifetime。
+2. **Token/s 只是熔断信号**：即使有生成窗口和最小 Token 保护，也不能证明真实模型能力；生产阈值仍需先观察正常分布。
+3. **CPA 流式边界**：插件无法透明重跑已开始输出的流；隔离竞态只会返回可重试 503，下一请求才走健康出口。
 4. **CGO .so 可移植性**：必须与 CPA 同 libc/架构；建议提供 build 容器。
 
 ## 6. 发布步骤（当前公开仓）
@@ -72,7 +74,7 @@ go build -buildmode=c-shared -o /tmp/grok2api-egress.so .
 git diff --check
 git status --short
 
-# 4. 合并后打 v1.0.4 tag；Release workflow 产出两种 Linux 架构和 checksums.txt
+# 4. 合并后打 v1.0.5 tag；Release workflow 产出两种 Linux 架构和 checksums.txt
 ```
 
 ## 7. 一句话 Pitch（README / Release）

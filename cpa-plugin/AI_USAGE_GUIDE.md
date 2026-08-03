@@ -1,6 +1,6 @@
 # CPA 出口守护 AI 部署与运维指南
 
-本文用于让 AI 工具或运维人员从零部署、配置和维护 `grok2api-egress` v1.0.4。插件是纯 CPA 原生实现，只读写 CLIProxyAPI（下称 CPA）的 xAI auth 文件和 Usage 事件，不依赖 Grok2API 运行时。
+本文用于让 AI 工具或运维人员从零部署、配置和维护 `grok2api-egress` v1.0.5。插件是纯 CPA 原生实现，只读写 CLIProxyAPI（下称 CPA）的 xAI auth 文件和 Usage 事件，不依赖 Grok2API 运行时。
 
 CPA 本身不会导致模型降智。这个插件只是在多账号、多出口场景中把 Token/s 等信号用作出口熔断依据；单账号或稳定静态代理部署可以不启用。
 
@@ -209,13 +209,13 @@ http://127.0.0.1:7953
 
 ### 3.3 固定代理与“代理池模式”
 
-UI 中的“固定代理/代理池”在 v1.0.4 主要是节点元数据：
+UI 中的“固定代理/代理池”在 v1.0.5 主要是节点元数据：
 
 - 固定住宅/静态 ISP：关闭“代理池模式”；
 - 上游 URL 每次建立新连接就会轮换出口：可开启“代理池模式”作为标记；
 - 用户名中包含 sticky session 时，仍建议把每个 session 建成独立节点。
 
-当前纯 CPA 插件不会因为开启“代理池模式”就自动改用户名、调用换 IP API 或创建新会话。是否真的换 IP，由上游代理或本地侧车决定，最终必须以连通检测返回的 `exit_ip` 为准。
+当前纯 CPA 插件不会因为开启“代理池模式”就自动改用户名、创建新会话或猜测代理商换 IP 接口。默认是否换 IP，仍由上游代理或本地侧车决定，最终必须以连通检测返回的 `exit_ip` 为准。v1.0.5 仅支持由运维显式配置、并限制节点 ID 的受信任内部换 IP Webhook，详见第 8.3 节。
 
 ## 4. 构建和安装插件
 
@@ -237,11 +237,18 @@ mkdir -p <CPA_PLUGIN_DATA_DIR>/egress-guard
 chmod 700 <CPA_PLUGIN_DATA_DIR>/egress-guard
 ```
 
-插件配置只需要状态文件路径：
+插件配置至少需要状态文件路径；自动换 IP 是可选的：
 
 ```yaml
 state_file: /CLIProxyAPI/plugin-data/egress-guard/state.json
+# 以下四项全部留空时，不会自动换 IP
+rotation_url: http://rotation-service:19099/rotate
+rotation_token_env: EGRESS_ROTATION_TOKEN
+rotation_timeout_seconds: 45
+rotatable_node_ids: ["1", "2"]
 ```
+
+`rotation_token_env` 的值必须通过 CPA 容器环境变量注入，不能把真实 token 写进 YAML、`state.json` 或截图。Webhook 接收 `nodeId` 与 `oldExitIp`，并且只有返回 2xx JSON 中的 `newExitIp` 与旧 IP 不同，插件才会继续对该节点做真实模型复测；Webhook 成功本身不会恢复节点。
 
 确保容器中该目录可写，并在升级前备份状态文件：
 
@@ -336,6 +343,8 @@ soft_tps: 500
 hard_tps: 1000
 consecutive_soft: 2
 consecutive_errors: 2
+min_generation_ms: 1000
+min_output_tokens: 32
 min_healthy_nodes: 1
 model: grok-4.5
 disable_auth_on_hard: true
@@ -354,6 +363,8 @@ max_output_tokens: 384
 | `hard_tps` | 硬阈值 | 命中立即隔离；误报代价高时适当上调 |
 | `consecutive_soft` | soft 连续次数 | 默认 2，降低误杀 |
 | `consecutive_errors` | 探测错误连续次数 | 默认 2，避免瞬断直接隔离 |
+| `min_generation_ms` | 计算 TPS 所需的最短生成窗口 | 默认 1000 ms；过短时回退用全请求时长，避免首字接近结束时虚高 |
+| `min_output_tokens` | 进入 soft/hard 判定所需的最小输出 | 默认 32；不足时记为 ignored，不改变异常 strike |
 | `min_healthy_nodes` | 隔离后至少保留的健康节点数 | 3 节点通常设 1；需要双出口冗余可设 2 |
 | `model` | 主动探测模型 | 必须是 CPA/xAI auth 实际可用模型 |
 | `disable_auth_on_hard` | 迁移失败时是否禁用原节点账号 | 建议开启，防止坏出口继续承载请求 |
@@ -362,7 +373,7 @@ max_output_tokens: 384
 模式选择：
 
 - `passive`：没有额外主动探测流量，但无普通请求时无法判断恢复质量；
-- `active`：定时检测稳定，但异常只能等到主动周期发现；
+- `active`：只跑定时检测，不处理被动 Usage；
 - `hybrid`：普通请求实时发现异常，30 分钟主动兜底，推荐使用。
 
 默认后台 worker 每 30 秒扫描一次，所以“隔离 120 秒”表示到期后的下一个扫描周期触发复测，不保证精确到秒。
@@ -374,7 +385,8 @@ healthy
   | hard 一次 / soft 连续 / error 连续
   v
 quarantined
-  |-- 账号迁到其他健康节点
+  |-- 先停用受影响账号，避免继续打到坏出口
+  |-- 仅迁到近期主动检测 healthy 且出口 IP 不同的节点
   |-- 无健康目标时禁用原地账号
   |-- 最低健康节点不足时抑制隔离
   v
@@ -388,12 +400,16 @@ quarantined
 
 几个关键行为：
 
-- 被动输出少于 32 token 的极短回复不会触发 hard 隔离；
-- 小于 200 ms 的生成窗口不会用虚高 TPS 直接判 hard；
+- 输出少于 `min_output_tokens` 的极短回复记为 ignored，不触发 soft/hard 隔离，也不重置已有 strike；
+- 小于 `min_generation_ms` 的生成窗口不会用虚高 TPS 直接判 hard；
 - hard 达阈值会立即隔离，soft 和 error 需要连续命中；
 - 如果隔离会让其他健康节点少于 `min_healthy_nodes`，动作会显示为 `suppressed`；
-- 质量检测可轮试同一通道的多个账号，单个过期/401 不应立即代表出口坏；
+- 质量检测可轮试同一通道的多个账号；401/403/429、额度、权限和上游 5xx 记为 ignored，不应代表出口坏；只有明确连接拒绝、reset、timeout、EOF、代理认证等传输错误才累计出口 error strike；
 - 恢复只代表节点重新可用，不会自动把已迁账号迁回。
+
+### 7.1 CPA 的请求级边界
+
+CPA 插件可以在调度前跳过被隔离节点，也会在“账号刚被选中、同时节点开始隔离迁移”的极小竞态窗口返回 `503` 和 `Retry-After: 1`。但 CPA 的插件 ABI 不能透明重跑一个已经向客户端开始输出的流式请求，因此它不会伪造“中途无感重试”。正确行为是：当前请求尽快得到可重试结果，后续请求由 CPA 调度到已验证健康的出口。
 
 ## 8. 隔离后强制住宅 IP 轮换并复测
 
@@ -401,7 +417,7 @@ quarantined
 
 1. **确认节点仍处于隔离。** 不要先手工启用节点或修改 `state.json`。
 2. **记下旧 `exit_ip`。** 从节点详情或最近一次连通测试读取。
-3. **在插件外换 IP。** 选择一种方式：
+3. **换 IP。** 未配置 Webhook 时在插件外执行；已配置第 8.3 节 Webhook 时，hard 隔离会自动触发一次。可选方式：
    - 修改该节点对应的 sticky session ID；
    - 调用代理商提供的可信换 IP API；
    - 修改本地代理侧车的上游并热重载；
@@ -414,6 +430,46 @@ quarantined
 9. **重新重平衡。** 确认稳定后点击“重平衡账号”，让迁出的账号逐步回到恢复节点。
 
 不要使用“连通成功后直接恢复”的捷径。连通检测只能证明代理能访问外网，不能证明该出口的真实模型质量正常。
+
+### 8.3 可选：受信任内部换 IP Webhook
+
+只在换 IP 服务与 CPA 同一受控网络、且已经验证接口能精确作用于单个节点时才启用。配置示例：
+
+```yaml
+plugins:
+  configs:
+    grok2api-egress:
+      enabled: true
+      state_file: /CLIProxyAPI/plugin-data/egress-guard/state.json
+      rotation_url: http://rotation-service:19099/rotate
+      rotation_token_env: EGRESS_ROTATION_TOKEN
+      rotation_timeout_seconds: 45
+      rotatable_node_ids: ["1", "2"]
+```
+
+CPA 容器环境变量：
+
+```text
+EGRESS_ROTATION_TOKEN=<private-token>
+```
+
+Webhook 约定：
+
+```json
+// request
+{"nodeId":"1","oldExitIp":"203.0.113.10"}
+
+// successful response
+{"newExitIp":"203.0.113.11"}
+```
+
+安全与行为约束：
+
+- 未列入 `rotatable_node_ids` 的节点永远不会自动换 IP；
+- 返回空 IP、相同 IP、非 2xx 或无效 JSON 都只记录 `node_rotation_failed`，节点保持隔离；
+- 成功后插件立即发起一次真实模型质量探测；只有 `healthy` 才恢复；
+- 不要把开放互联网 URL、代理商总控接口或无节点权限隔离的接口直接填入 `rotation_url`；
+- 静态代理应改节点 URL 后手动连通和质量复测，不要虚构“换 IP 成功”。
 
 ### 8.1 sticky 会话轮换示例
 
@@ -523,7 +579,7 @@ curl --fail --silent --show-error \
 
 ### 质量测试 401
 
-401 通常是 auth 的 access token、过期时间、客户端头或上游权限问题，不等于代理降智。确认 CPA 中存在可用 xAI auth，模型名正确；插件会在同一通道最多轮试多个候选账号。
+401 通常是 auth 的 access token、过期时间、客户端头或上游权限问题，不等于代理降智。确认 CPA 中存在可用 xAI auth，模型名正确；插件会在同一通道最多轮试多个候选账号。v1.0.5 会把这类结果显示为 ignored，不会累计出口 error strike 或隔离节点。
 
 ### 显示“没有可用的 CPA xAI 账号”
 
@@ -540,6 +596,10 @@ curl --fail --silent --show-error \
 ### 隔离到期后仍未恢复
 
 自动复测最多还会受 30 秒 worker 扫描周期影响。若真实模型检测返回 soft、hard 或 error，节点会保持隔离。先处理代理或账号问题，不要直接改状态文件。
+
+### 出现 `node_rotation_failed`
+
+先看事件原因。未列入 `rotatable_node_ids` 的节点不会调用 Webhook；已启用轮换后，常见失败是 Webhook 超时/非 2xx、返回 JSON 缺少 `newExitIp`，或返回的 IP 与旧值相同。插件故意不会在这些情况下恢复节点。确认 Webhook 只作用于目标节点、返回真实新出口 IP 后再重试。
 
 ### 节点恢复后账号数量还是 0
 
@@ -558,7 +618,7 @@ auth 到代理的映射仍有短缓存，后台隔离复测最多受 worker 扫�
 ## 12. 给 AI 工具的推荐任务提示词
 
 ```text
-你正在部署 grok2api-egress-enhancements/cpa-plugin v1.0.4。
+你正在部署 grok2api-egress-enhancements/cpa-plugin v1.0.5。
 
 先阅读：
 1. cpa-plugin/README.md
@@ -573,8 +633,10 @@ auth 到代理的映射仍有短缓存，后台隔离复测最多受 worker 扫�
 - 每个出口使用独立 sticky session；先连通检测并确认出口 IP 不同。
 - 初始按 50-100 账号/出口部署，至少 3 个节点，并预留 20%-30% 故障迁移容量。
 - account_capacity 不是硬上限，不得声称插件能阻止超配。
-- proxy_pool 是类型标记，不得声称插件会自动调用代理商换 IP。
-- 隔离后先迁号；强制换 sticky 或替换代理必须在插件外完成。
+- proxy_pool 是类型标记；除非显式配置受信任的 rotation_url 和 rotatable_node_ids，不得声称插件会自动调用代理商换 IP。
+- 隔离后先摘除并迁号；强制换 sticky 或替换代理默认在插件外完成。
+- 401/403/429、额度、权限和上游错误不是出口故障，不得因此隔离节点；只有明确传输错误才累计出口 error strike。
+- 不得把手动 disabled 的账号重新启用；只能恢复带 egress-guard 标记的账号。
 - 换 IP 后先确认 exit_ip 变化，再执行真实模型质量检测；只有 healthy 才可恢复。
 - 节点恢复后确认稳定，再执行 rebalance 把账号迁回。
 - 所有配置示例必须脱敏，任何破坏性操作前先备份。

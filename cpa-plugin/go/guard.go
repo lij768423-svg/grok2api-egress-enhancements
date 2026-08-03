@@ -10,24 +10,27 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 )
 
-func computeTPS(outputTokens, durationMs, firstTokenMs int64) float64 {
+func computeTPS(outputTokens, durationMs, firstTokenMs, minGenerationMs int64) float64 {
 	if outputTokens <= 0 || durationMs <= 0 {
 		return 0
 	}
 	denom := durationMs - firstTokenMs
 	// Short replies often have firstToken ≈ duration, which blows up TPS and
-	// false-triggers hard quarantine. Require a minimum generation window.
-	const minGenMs int64 = 200
-	if denom < minGenMs {
+	// false-triggers hard quarantine. Require a configurable generation window.
+	if minGenerationMs <= 0 {
+		minGenerationMs = 1000
+	}
+	if denom < minGenerationMs {
 		denom = durationMs
 	}
-	if denom < minGenMs {
+	if denom < minGenerationMs {
 		return 0
 	}
 	// Ignore tiny outputs for hard-class decisions upstream; still return TPS.
@@ -40,6 +43,12 @@ var (
 	authProxyCache map[string]string
 	authProxyAt    time.Time
 )
+
+func invalidateAuthProxyCache() {
+	authProxyMu.Lock()
+	authProxyAt = time.Time{}
+	authProxyMu.Unlock()
+}
 
 func refreshAuthProxyCache() map[string]string {
 	authProxyMu.Lock()
@@ -56,6 +65,9 @@ func refreshAuthProxyCache() map[string]string {
 			}
 			if a.Index != "" {
 				out[a.Index] = a.ProxyURL
+			}
+			if a.ID != "" {
+				out[a.ID] = a.ProxyURL
 			}
 			if a.Name != "" {
 				out[a.Name] = a.ProxyURL
@@ -118,6 +130,73 @@ func classifyTPS(tps float64, soft, hard float64) string {
 	return "healthy"
 }
 
+// classifyQuality applies the minimum-evidence guard before TPS thresholds.
+// Tiny responses are not enough evidence to call an egress degraded: provider
+// usage fields can be missing or generation may have ended immediately.
+func classifyQuality(tps float64, outputTokens int64, pol policyConfig) string {
+	if outputTokens <= 0 || tps <= 0 {
+		return "unknown"
+	}
+	if pol.MinOutputTokens > 0 && outputTokens < pol.MinOutputTokens {
+		return "ignored"
+	}
+	return classifyTPS(tps, pol.SoftTPS, pol.HardTPS)
+}
+
+func classifyFailureKind(status int, body string) string {
+	lower := strings.ToLower(body)
+	if status == http.StatusProxyAuthRequired {
+		return "transport_error"
+	}
+	if status == http.StatusUnauthorized || status == http.StatusForbidden || status == http.StatusBadRequest || status == http.StatusNotFound || status == http.StatusConflict || status == http.StatusUnprocessableEntity || status == http.StatusTooManyRequests {
+		return "account_error"
+	}
+	for _, marker := range []string{"invalid token", "expired", "no auth", "quota", "rate limit", "ratelimit", "too many requests", "permission denied", "forbidden"} {
+		if strings.Contains(lower, marker) {
+			return "account_error"
+		}
+	}
+	for _, marker := range []string{"connection refused", "connection reset", "dial tcp", "timeout", "timed out", "eof", "tls handshake", "no such host", "proxyconnect", "proxy authentication"} {
+		if strings.Contains(lower, marker) {
+			return "transport_error"
+		}
+	}
+	if status >= 500 && status <= 599 {
+		return "upstream_error"
+	}
+	return "request_error"
+}
+
+func maxInt64(values ...int64) int64 {
+	var result int64
+	for _, value := range values {
+		if value > result {
+			result = value
+		}
+	}
+	return result
+}
+
+// outputTokensFromUsage normalizes CPA/OpenAI-compatible aliases. In CPA's
+// xAI usage contract, completion_tokens/output_tokens are aliases and
+// reasoning_tokens is a detail bucket, so summing them double-counts output.
+func outputTokensFromUsage(usage map[string]any) int64 {
+	if usage == nil {
+		return 0
+	}
+	return maxInt64(
+		anyInt(usage["completion_tokens"]),
+		anyInt(usage["output_tokens"]),
+		anyInt(usage["CompletionTokens"]),
+		anyInt(usage["OutputTokens"]),
+		anyInt(usage["completionTokens"]),
+		anyInt(usage["outputTokens"]),
+		anyInt(usage["reasoning_tokens"]),
+		anyInt(usage["ReasoningTokens"]),
+		anyInt(usage["reasoningTokens"]),
+	)
+}
+
 func httpClientThroughProxy(proxyURL string, timeout time.Duration) (*http.Client, error) {
 	transport := &http.Transport{
 		Proxy: http.ProxyFromEnvironment,
@@ -166,7 +245,81 @@ type qualityResult struct {
 	FirstTokenMs   int64   `json:"first_token_ms"`
 	ExitIP         string  `json:"exit_ip,omitempty"`
 	Error          string  `json:"error,omitempty"`
+	ErrorKind      string  `json:"error_kind,omitempty"`
 	Model          string  `json:"model,omitempty"`
+}
+
+func rotationAllowed(cfg pluginConfig, nodeID string) bool {
+	if strings.TrimSpace(cfg.RotationURL) == "" || strings.TrimSpace(nodeID) == "" {
+		return false
+	}
+	for _, allowed := range cfg.RotatableNodeIDs {
+		if strings.TrimSpace(allowed) == nodeID {
+			return true
+		}
+	}
+	return false
+}
+
+func rotateNodeIfConfigured(store *stateStore, node *nodeRecord) (bool, error) {
+	if node == nil {
+		return false, nil
+	}
+	value := currentConfig.Load()
+	if value == nil {
+		return false, nil
+	}
+	cfg, ok := value.(pluginConfig)
+	if !ok || !rotationAllowed(cfg, node.ID) {
+		return false, nil
+	}
+	parsed, err := url.Parse(strings.TrimSpace(cfg.RotationURL))
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return false, fmt.Errorf("换 IP Webhook URL 无效")
+	}
+	payload, _ := json.Marshal(map[string]any{"nodeId": node.ID, "oldExitIp": node.ExitIP})
+	req, err := http.NewRequest(http.MethodPost, parsed.String(), bytes.NewReader(payload))
+	if err != nil {
+		return false, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if envName := strings.TrimSpace(cfg.RotationTokenEnv); envName != "" {
+		if token := strings.TrimSpace(os.Getenv(envName)); token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+	}
+	timeout := time.Duration(cfg.RotationTimeoutSec) * time.Second
+	if timeout <= 0 {
+		timeout = 45 * time.Second
+	}
+	client := &http.Client{Timeout: timeout}
+	resp, err := client.Do(req)
+	if err != nil {
+		return false, fmt.Errorf("换 IP 请求失败: %w", err)
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return false, fmt.Errorf("换 IP 返回 HTTP %d", resp.StatusCode)
+	}
+	var result map[string]any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		return false, fmt.Errorf("换 IP 响应无效")
+	}
+	newIP := firstString(result, "newExitIp", "new_exit_ip", "exitIp", "exit_ip")
+	if newIP == "" || (node.ExitIP != "" && newIP == node.ExitIP) {
+		return false, fmt.Errorf("换 IP 未确认出口变化")
+	}
+	updated, err := store.updateNode(node.ID, func(n *nodeRecord) error {
+		n.ExitIP = newIP
+		n.LastReason = "已换 IP，等待真实模型复测"
+		return nil
+	})
+	if err != nil || updated == nil {
+		return false, fmt.Errorf("保存换 IP 状态失败")
+	}
+	store.appendEvent(guardEvent{Event: "node_rotated", NodeID: node.ID, NodeName: node.Name, Reason: "Webhook 已确认出口 IP 变化"})
+	return true, nil
 }
 
 func applyGrokClientHeaders(req *http.Request, auth authFile) {
@@ -229,6 +382,7 @@ func probeQuality(store *stateStore, node *nodeRecord) qualityResult {
 	res := qualityResult{Model: pol.Model}
 	if node == nil || node.ProxyURL == "" {
 		res.Classification = "error"
+		res.ErrorKind = "request_error"
 		res.Error = "节点缺少代理"
 		return res
 	}
@@ -241,6 +395,7 @@ func probeQuality(store *stateStore, node *nodeRecord) qualityResult {
 	candidates, err := listAuthsForNode(node, 8)
 	if err != nil || len(candidates) == 0 {
 		res.Classification = "error"
+		res.ErrorKind = "no_account"
 		if err != nil {
 			res.Error = err.Error()
 		} else {
@@ -252,6 +407,7 @@ func probeQuality(store *stateStore, node *nodeRecord) qualityResult {
 	client, err := httpClientThroughProxy(node.ProxyURL, 90*time.Second)
 	if err != nil {
 		res.Classification = "error"
+		res.ErrorKind = "transport_error"
 		res.Error = err.Error()
 		return res
 	}
@@ -291,6 +447,7 @@ func probeQuality(store *stateStore, node *nodeRecord) qualityResult {
 		req, errReq := http.NewRequest(http.MethodPost, baseURL+"/chat/completions", bytes.NewReader(body))
 		if errReq != nil {
 			res.Classification = "error"
+			res.ErrorKind = "request_error"
 			res.Error = "无法创建探测请求"
 			return res
 		}
@@ -303,6 +460,7 @@ func probeQuality(store *stateStore, node *nodeRecord) qualityResult {
 		resp, errDo := client.Do(req)
 		if errDo != nil {
 			lastErr = "模型探测请求失败: " + truncate(errDo.Error(), 120)
+			res.ErrorKind = "transport_error"
 			res.DurationMs = time.Since(start).Milliseconds()
 			continue
 		}
@@ -312,9 +470,11 @@ func probeQuality(store *stateStore, node *nodeRecord) qualityResult {
 			_ = resp.Body.Close()
 			msg := fmt.Sprintf("上游 HTTP %d: %s", resp.StatusCode, truncate(string(b), 160))
 			lastErr = msg
+			res.ErrorKind = classifyFailureKind(resp.StatusCode, string(b))
 			res.DurationMs = time.Since(start).Milliseconds()
-			if isAuthErrorRetryable(resp.StatusCode, string(b)) && i+1 < len(candidates) {
-				// try next account on same channel
+			if (res.ErrorKind == "account_error" || isAuthErrorRetryable(resp.StatusCode, string(b))) && i+1 < len(candidates) {
+				// Account/quota errors belong to the credential, not the egress.
+				// Try another account on the same channel before classifying it.
 				continue
 			}
 			res.Classification = "error"
@@ -347,8 +507,8 @@ func probeQuality(store *stateStore, node *nodeRecord) qualityResult {
 				continue
 			}
 			if u, ok := chunk["usage"].(map[string]any); ok {
-				usageOut = anyInt(u["completion_tokens"]) + anyInt(u["output_tokens"])
-				usageReason = anyInt(u["reasoning_tokens"])
+				usageOut = maxInt64(usageOut, outputTokensFromUsage(u))
+				usageReason = maxInt64(usageReason, anyInt(u["reasoning_tokens"]), anyInt(u["reasoningTokens"]))
 			}
 			choices, _ := chunk["choices"].([]any)
 			for _, c := range choices {
@@ -372,13 +532,24 @@ func probeQuality(store *stateStore, node *nodeRecord) qualityResult {
 			}
 		}
 		_ = resp.Body.Close()
+		if scanErr := scanner.Err(); scanErr != nil {
+			lastErr = "模型探测流读取失败: " + truncate(scanErr.Error(), 120)
+			res.ErrorKind = "transport_error"
+			res.DurationMs = time.Since(start).Milliseconds()
+			continue
+		}
 
 		duration := time.Since(start)
 		res.DurationMs = duration.Milliseconds()
 		if !firstTokenAt.IsZero() {
 			res.FirstTokenMs = firstTokenAt.Sub(start).Milliseconds()
 		}
-		outTokens := usageOut + usageReason
+		// CPA's xAI usage contract treats reasoning tokens as a subset of output
+		// tokens. Prefer the authoritative total instead of adding the buckets.
+		outTokens := usageOut
+		if usageReason > outTokens {
+			outTokens = usageReason
+		}
 		if outTokens <= 0 {
 			outTokens = int64(contentLen / 4)
 			if outTokens == 0 && contentLen > 0 {
@@ -386,17 +557,22 @@ func probeQuality(store *stateStore, node *nodeRecord) qualityResult {
 			}
 		}
 		res.OutputTokens = outTokens
-		res.TPS = computeTPS(outTokens, res.DurationMs, res.FirstTokenMs)
-		res.Classification = classifyTPS(res.TPS, pol.SoftTPS, pol.HardTPS)
+		res.TPS = computeTPS(outTokens, res.DurationMs, res.FirstTokenMs, pol.MinGenerationMs)
+		res.Classification = classifyQuality(res.TPS, outTokens, pol)
 		if res.Classification == "unknown" && outTokens == 0 {
 			lastErr = "探测无输出"
+			res.ErrorKind = "no_output"
 			continue
 		}
 		res.Error = ""
+		res.ErrorKind = ""
 		return res
 	}
 
 	res.Classification = "error"
+	if res.ErrorKind == "" {
+		res.ErrorKind = "transport_error"
+	}
 	if lastErr == "" {
 		lastErr = "所有候选账号探测失败"
 	}
@@ -422,6 +598,9 @@ func anyInt(v any) int64 {
 
 func applyObservation(store *stateStore, nodeID, source string, res qualityResult) {
 	pol := store.policy()
+	if res.Classification == "error" && res.ErrorKind != "transport_error" {
+		res.Classification = "ignored"
+	}
 	now := float64(time.Now().Unix())
 	var (
 		doRestore     bool
@@ -482,6 +661,13 @@ func applyObservation(store *stateStore, nodeID, source string, res qualityResul
 		store.bumpStat(source, res.Classification, res.OutputTokens)
 		return
 	}
+	if res.Classification == "ignored" {
+		// Account, quota, upstream and no-account failures are not evidence that
+		// the egress is degraded. Keep the observation for diagnostics, but never
+		// spend error strikes or quarantine the node for them.
+		store.bumpStat(source, "ignored", res.OutputTokens)
+		return
+	}
 	if doRestore {
 		store.bumpAction("restored")
 		store.appendEvent(guardEvent{Event: "node_restored", NodeID: nodeCopy.ID, NodeName: nodeCopy.Name, Classification: "healthy", OutputTPS: res.TPS})
@@ -529,12 +715,23 @@ func quarantineNode(store *stateStore, nodeID, reason string, tps float64, class
 	}
 	store.bumpAction("quarantined")
 	store.appendEvent(guardEvent{Event: "node_quarantined", NodeID: updated.ID, NodeName: updated.Name, Reason: reason, Classification: class, OutputTPS: tps})
-	// Move accounts off the bad channel onto healthy ones (or disable in place).
-	go func(nn nodeRecord, why string) {
-		if err := migrateAuthsOffNode(store, &nn); err != nil && pol.DisableAuthOnHard {
-			_ = disableAuthsOnNode(store, &nn, "egress-guard 降智隔离: "+why)
+	// Move accounts off the bad channel synchronously. The first phase disables
+	// them, so no new request can continue using the quarantined egress while
+	// migration and post-save verification are in flight.
+	if err := migrateAuthsOffNode(store, updated); err != nil {
+		store.appendEvent(guardEvent{Event: "accounts_migration_failed", NodeID: updated.ID, NodeName: updated.Name, Reason: err.Error()})
+		if pol.DisableAuthOnHard {
+			_ = disableAuthsOnNode(store, updated, "egress-guard 降智隔离: "+reason)
 		}
-	}(*updated, reason)
+	}
+	if rotated, err := rotateNodeIfConfigured(store, updated); err != nil {
+		store.appendEvent(guardEvent{Event: "node_rotation_failed", NodeID: updated.ID, NodeName: updated.Name, Reason: err.Error()})
+	} else if rotated {
+		// A newly rotated IP gets exactly one real-model confirmation before it
+		// can leave quarantine. A healthy result restores the node; anomalies keep
+		// it isolated for the normal recovery worker.
+		_, _ = runNodeQuality(store, updated.ID)
+	}
 }
 
 func runNodeConnectivity(store *stateStore, id string) (map[string]any, error) {
@@ -575,6 +772,9 @@ func runNodeQuality(store *stateStore, id string) (map[string]any, error) {
 		// still allow manual quality test for recovery
 	}
 	res := probeQuality(store, n)
+	if res.Classification == "error" && res.ErrorKind != "transport_error" {
+		res.Classification = "ignored"
+	}
 	applyObservation(store, id, "active", res)
 	store.appendEvent(guardEvent{
 		Event:          "quality_probe_completed",
@@ -593,6 +793,7 @@ func runNodeQuality(store *stateStore, id string) (map[string]any, error) {
 		"firstTokenMs":   res.FirstTokenMs,
 		"exitIp":         res.ExitIP,
 		"error":          res.Error,
+		"errorKind":      res.ErrorKind,
 		"model":          res.Model,
 	}, nil
 }
@@ -600,6 +801,13 @@ func runNodeQuality(store *stateStore, id string) (map[string]any, error) {
 // handlePassiveUsage maps a CPA usage event onto a node by auth proxy_url.
 func handlePassiveUsage(store *stateStore, record map[string]any) {
 	pol := store.policy()
+	if pol.Mode == "active" {
+		return
+	}
+	provider := strings.ToLower(firstString(record, "Provider", "provider"))
+	if provider != "" && !strings.Contains(provider, "xai") && !strings.Contains(provider, "grok") {
+		return
+	}
 	authID := firstString(record, "AuthID", "auth_id", "authId", "AuthIndex", "auth_index")
 	authIndex := firstString(record, "AuthIndex", "auth_index")
 	failed := false
@@ -612,15 +820,15 @@ func handlePassiveUsage(store *stateStore, record map[string]any) {
 
 	var outTokens, durMs, ttftMs int64
 	if detail, ok := record["Detail"].(map[string]any); ok {
-		outTokens = anyInt(detail["OutputTokens"]) + anyInt(detail["ReasoningTokens"])
+		outTokens = outputTokensFromUsage(detail)
 	}
 	if detail, ok := record["detail"].(map[string]any); ok {
 		if outTokens == 0 {
-			outTokens = anyInt(detail["output_tokens"]) + anyInt(detail["reasoning_tokens"]) + anyInt(detail["OutputTokens"])
+			outTokens = outputTokensFromUsage(detail)
 		}
 	}
 	if outTokens == 0 {
-		outTokens = firstInt(record, "output_tokens", "OutputTokens", "completion_tokens")
+		outTokens = maxInt64(firstInt(record, "output_tokens", "OutputTokens", "completion_tokens", "completionTokens"), firstInt(record, "reasoning_tokens", "ReasoningTokens"))
 	}
 	durMs = firstInt(record, "duration_ms", "DurationMs", "latency_ms")
 	if durMs == 0 {
@@ -653,23 +861,28 @@ func handlePassiveUsage(store *stateStore, record map[string]any) {
 
 	class := "unknown"
 	tps := 0.0
+	errorKind := ""
 	if failed {
-		class = "error"
-	} else {
-		tps = computeTPS(outTokens, durMs, ttftMs)
-		class = classifyTPS(tps, pol.SoftTPS, pol.HardTPS)
-		// Very small outputs should not hard-quarantine (loadtest OK replies).
-		if class == "hard" && outTokens < 32 {
-			class = "healthy"
-			tps = 0
+		failure, _ := record["Failure"].(map[string]any)
+		if failure == nil {
+			failure, _ = record["failure"].(map[string]any)
 		}
+		status := int(firstInt(failure, "StatusCode", "status_code", "status"))
+		body := firstString(failure, "Body", "body", "message", "error")
+		errorKind = classifyFailureKind(status, body)
+		if errorKind == "transport_error" {
+			class = "error"
+		} else {
+			class = "ignored"
+		}
+	} else {
+		tps = computeTPS(outTokens, durMs, ttftMs, pol.MinGenerationMs)
+		class = classifyQuality(tps, outTokens, pol)
 	}
 
 	// On anomaly, force auth-proxy cache refresh so we don't miss mappings.
 	if class == "hard" || class == "soft" {
-		authProxyMu.Lock()
-		authProxyAt = time.Time{}
-		authProxyMu.Unlock()
+		invalidateAuthProxyCache()
 	}
 	nodeID := resolveNodeIDForAuth(store, authID, authIndex,
 		filepath.Base(authID), strings.TrimSuffix(filepath.Base(authID), ".json"))
@@ -679,6 +892,7 @@ func handlePassiveUsage(store *stateStore, record map[string]any) {
 		OutputTokens:   outTokens,
 		DurationMs:     durMs,
 		FirstTokenMs:   ttftMs,
+		ErrorKind:      errorKind,
 	}
 	if nodeID == "" {
 		store.bumpStat("passive", class, outTokens)
@@ -690,20 +904,6 @@ func handlePassiveUsage(store *stateStore, record map[string]any) {
 				OutputTPS:      tps,
 				Reason:         fmt.Sprintf("usage 未映射到出口节点 auth=%s idx=%s tokens=%d dur=%dms ttft=%dms", authID, authIndex, outTokens, durMs, ttftMs),
 			})
-			// Last resort: attribute hard to the busiest enabled node so we still act.
-			if class == "hard" {
-				if fallback := busiestEnabledNode(store); fallback != "" {
-					store.appendEvent(guardEvent{
-						Event:          "hard_fallback_map",
-						NodeID:         fallback,
-						AuthID:         authID,
-						Classification: "hard",
-						OutputTPS:      tps,
-						Reason:         "未映射账号的硬异常，回退记到负载最高通道并隔离",
-					})
-					applyObservation(store, fallback, "passive", res)
-				}
-			}
 		}
 		return
 	}

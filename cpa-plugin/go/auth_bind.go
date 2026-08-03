@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginabi"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
@@ -22,6 +23,7 @@ type hostAuthGetResponse struct {
 }
 
 type authFile struct {
+	ID       string
 	Index    string
 	Name     string
 	Path     string
@@ -32,7 +34,7 @@ type authFile struct {
 }
 
 func listAuthFiles() ([]authFile, error) {
-	raw, err := callHost(pluginabi.MethodHostAuthList, mustJSON(map[string]any{}))
+	raw, err := hostCall(pluginabi.MethodHostAuthList, mustJSON(map[string]any{}))
 	if err != nil {
 		return nil, err
 	}
@@ -77,16 +79,17 @@ func listAuthFiles() ([]authFile, error) {
 				continue
 			}
 		}
+		got.ID = strings.TrimSpace(f.ID)
 		out = append(out, got)
 	}
 	return out, nil
 }
 
 func getAuthFile(authIndex string) (authFile, error) {
-	raw, err := callHost(pluginabi.MethodHostAuthGet, mustJSON(map[string]any{"auth_index": authIndex}))
+	raw, err := hostCall(pluginabi.MethodHostAuthGet, mustJSON(map[string]any{"auth_index": authIndex}))
 	if err != nil {
 		// try name field
-		raw, err = callHost(pluginabi.MethodHostAuthGet, mustJSON(map[string]any{"name": authIndex}))
+		raw, err = hostCall(pluginabi.MethodHostAuthGet, mustJSON(map[string]any{"name": authIndex}))
 		if err != nil {
 			return authFile{}, err
 		}
@@ -132,10 +135,13 @@ func saveAuthFile(name string, obj map[string]any) error {
 	if err != nil {
 		return err
 	}
-	_, err = callHost(pluginabi.MethodHostAuthSave, mustJSON(map[string]any{
+	_, err = hostCall(pluginabi.MethodHostAuthSave, mustJSON(map[string]any{
 		"name": name,
 		"json": json.RawMessage(raw),
 	}))
+	if err == nil {
+		invalidateAuthProxyCache()
+	}
 	return err
 }
 
@@ -161,6 +167,50 @@ func setAuthProxyAndFlags(a authFile, proxyURL string, disabled bool, reason str
 		a.Raw["type"] = "xai"
 	}
 	return saveAuthFile(a.Name, a.Raw)
+}
+
+func isGuardDisabledAuth(a authFile) bool {
+	if !a.Disabled {
+		return false
+	}
+	reason, _ := a.Raw["disabled_reason"].(string)
+	return strings.Contains(reason, "egress-guard") || strings.Contains(reason, "降智")
+}
+
+func verifyAuthBinding(a authFile, expectedProxy string, expectedDisabled bool) error {
+	key := firstNonEmpty(a.Index, a.Name)
+	if key == "" {
+		return fmt.Errorf("账号缺少 auth index")
+	}
+	got, err := getAuthFile(key)
+	if err == nil && got.ProxyURL == expectedProxy && got.Disabled == expectedDisabled {
+		return nil
+	}
+	// A host may regenerate the runtime auth index after host.auth.save. Verify
+	// by the stable physical file name before treating the write as failed.
+	for _, candidate := range []string{a.Name, filepath.Base(a.Path)} {
+		candidate = strings.TrimSpace(candidate)
+		if candidate == "" {
+			continue
+		}
+		for _, listed := range listAuthFilesBestEffort() {
+			if listed.Name == candidate && listed.ProxyURL == expectedProxy && listed.Disabled == expectedDisabled {
+				return nil
+			}
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("读取迁移结果失败: %w", err)
+	}
+	return fmt.Errorf("迁移结果未生效")
+}
+
+func listAuthFilesBestEffort() []authFile {
+	items, err := listAuthFiles()
+	if err != nil {
+		return nil
+	}
+	return items
 }
 
 func rebalanceAuthsToNodes(store *stateStore) (map[string]int, error) {
@@ -222,6 +272,9 @@ func rebalanceAuthsToNodes(store *stateStore) (map[string]int, error) {
 		if err := setAuthProxyAndFlags(a, chosen.ProxyURL, false, ""); err != nil {
 			return counts, fmt.Errorf("绑定 %s 失败: %w", a.Name, err)
 		}
+		if err := verifyAuthBinding(a, chosen.ProxyURL, false); err != nil {
+			return counts, fmt.Errorf("绑定 %s 校验失败: %w", a.Name, err)
+		}
 		counts[chosen.ID]++
 	}
 	store.setAssignedCounts(counts)
@@ -259,7 +312,9 @@ func disableAuthsOnNode(store *stateStore, node *nodeRecord, reason string) erro
 	}
 	for _, a := range auths {
 		if a.ProxyURL == node.ProxyURL && !a.Disabled {
-			_ = setAuthProxyAndFlags(a, a.ProxyURL, true, reason)
+			if err := setAuthProxyAndFlags(a, a.ProxyURL, true, reason); err != nil {
+				return fmt.Errorf("停用 %s 失败: %w", a.Name, err)
+			}
 		}
 	}
 	return nil
@@ -276,7 +331,7 @@ func enableAuthsOnNode(node *nodeRecord) error {
 	for _, a := range auths {
 		if a.ProxyURL == node.ProxyURL && a.Disabled {
 			reason, _ := a.Raw["disabled_reason"].(string)
-			if strings.Contains(reason, "egress-guard") || strings.Contains(reason, "降智") || reason == "" {
+			if strings.Contains(reason, "egress-guard") || strings.Contains(reason, "降智") {
 				_ = setAuthProxyAndFlags(a, a.ProxyURL, false, "")
 			}
 		}
@@ -370,7 +425,34 @@ func listBoundAuthSummaries(node *nodeRecord) ([]map[string]any, error) {
 	return out, nil
 }
 
-// migrateAuthsOffNode moves enabled auths off a quarantined node onto healthy nodes.
+func verifiedMigrationTargets(store *stateStore, bad *nodeRecord) []*nodeRecord {
+	if store == nil || bad == nil {
+		return nil
+	}
+	pol := store.policy()
+	freshness := time.Duration(pol.ActiveIntervalSec*2) * time.Second
+	if freshness < time.Hour {
+		freshness = time.Hour
+	}
+	cutoff := float64(time.Now().Add(-freshness).Unix())
+	targets := make([]*nodeRecord, 0)
+	for _, n := range store.listNodes() {
+		if n.ID == bad.ID || !n.Enabled || n.DisabledByGuard || n.ProxyURL == "" {
+			continue
+		}
+		if n.LastClassification != "healthy" || n.LastProbeAt <= cutoff || n.ExitIP == "" {
+			continue
+		}
+		if bad.ExitIP != "" && n.ExitIP == bad.ExitIP {
+			continue
+		}
+		targets = append(targets, n)
+	}
+	return targets
+}
+
+// migrateAuthsOffNode fails closed, then moves only guard-managed accounts to
+// recently active-verified nodes with a different observed exit IP.
 func migrateAuthsOffNode(store *stateStore, bad *nodeRecord) error {
 	if bad == nil || bad.ProxyURL == "" {
 		return nil
@@ -379,29 +461,36 @@ func migrateAuthsOffNode(store *stateStore, bad *nodeRecord) error {
 	if err != nil {
 		return err
 	}
-	healthy := make([]*nodeRecord, 0)
-	for _, n := range store.listNodes() {
-		if n.ID == bad.ID {
-			continue
-		}
-		if n.Enabled && !n.DisabledByGuard && n.ProxyURL != "" {
-			healthy = append(healthy, n)
+	affected := make([]authFile, 0)
+	for _, a := range auths {
+		if a.ProxyURL == bad.ProxyURL && (!a.Disabled || isGuardDisabledAuth(a)) {
+			affected = append(affected, a)
 		}
 	}
+	if len(affected) == 0 {
+		return nil
+	}
+	// Remove every affected account from scheduling before changing its proxy.
+	for _, a := range affected {
+		if a.Disabled {
+			continue
+		}
+		if err := setAuthProxyAndFlags(a, a.ProxyURL, true, "egress-guard 隔离中"); err != nil {
+			return fmt.Errorf("隔离账号 %s 失败: %w", a.Name, err)
+		}
+	}
+	healthy := verifiedMigrationTargets(store, bad)
 	if len(healthy) == 0 {
-		// no destination — just disable in place
-		return disableAuthsOnNode(store, bad, "egress-guard 降智隔离: 无健康通道可迁移")
+		return fmt.Errorf("没有通过主动检测且出口 IP 不同的健康通道")
 	}
 	cursor := 0
 	moved := 0
-	for _, a := range auths {
-		if a.ProxyURL != bad.ProxyURL {
-			continue
-		}
+	failed := 0
+	for _, a := range affected {
 		dest := healthy[cursor%len(healthy)]
 		cursor++
-		// re-enable if previously guard-disabled, bind to healthy proxy
-		if err := setAuthProxyAndFlags(a, dest.ProxyURL, false, ""); err != nil {
+		if err := setAuthProxyAndFlags(a, dest.ProxyURL, false, ""); err != nil || verifyAuthBinding(a, dest.ProxyURL, false) != nil {
+			failed++
 			continue
 		}
 		moved++
@@ -412,8 +501,11 @@ func migrateAuthsOffNode(store *stateStore, bad *nodeRecord) error {
 			Event:    "accounts_migrated",
 			NodeID:   bad.ID,
 			NodeName: bad.Name,
-			Reason:   fmt.Sprintf("隔离后迁出 %d 个账号到健康通道", moved),
+			Reason:   fmt.Sprintf("隔离后迁出 %d 个账号到健康通道，失败 %d 个", moved, failed),
 		})
+	}
+	if failed > 0 {
+		return fmt.Errorf("%d 个账号迁移或验证失败", failed)
 	}
 	return nil
 }

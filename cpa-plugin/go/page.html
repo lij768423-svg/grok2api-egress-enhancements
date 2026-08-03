@@ -180,7 +180,7 @@
     <header class="page-head">
       <div>
         <h1>出口守护</h1>
-        <p>纯 CPA 实现 · Group Free 降智隔离 · 节点 CRUD · 质量检测 · 账号通道绑定</p>
+        <p>纯 CPA 实现 · 出口质量隔离 · 节点 CRUD · 质量检测 · 账号通道绑定</p>
       </div>
       <div class="head-actions">
         <span class="status-line"><span id="service-dot" class="status-dot"></span><span id="service-text">正在连接</span></span>
@@ -285,7 +285,12 @@
           <div class="field"><label for="policy-hard">硬阈值 Token/s</label><input id="policy-hard" type="number" min="2" max="10000" step="1"></div>
           <div class="field"><label for="policy-soft-count">连续软异常次数</label><input id="policy-soft-count" type="number" min="1" max="20"></div>
           <div class="field"><label for="policy-error-count">连续错误次数</label><input id="policy-error-count" type="number" min="1" max="20"></div>
-          <div class="field full"><label for="policy-min-healthy">最低健康节点数</label><input id="policy-min-healthy" type="number" min="1" max="1000"></div>
+          <div class="field"><label for="policy-min-generation">最短生成窗口（毫秒）</label><input id="policy-min-generation" type="number" min="200" max="10000"></div>
+          <div class="field"><label for="policy-min-output">最小判定 Token 数</label><input id="policy-min-output" type="number" min="1" max="10000"></div>
+          <div class="field"><label for="policy-max-output">主动探测最大输出 Token</label><input id="policy-max-output" type="number" min="16" max="4096"></div>
+          <div class="field"><label for="policy-model">主动探测模型</label><input id="policy-model" maxlength="120" autocomplete="off"></div>
+          <div class="field"><label for="policy-min-healthy">最低健康节点数</label><input id="policy-min-healthy" type="number" min="1" max="1000"></div>
+          <div class="field full check-row"><div><label for="policy-disable-auth">迁移失败时停用原节点账号</label><p class="help">启用可防止坏出口继续接收请求；手动停用账号不会被自动恢复</p></div><input id="policy-disable-auth" type="checkbox"></div>
         </div>
         <div class="modal-actions"><button class="button" type="button" data-close="policy-modal">取消</button><button id="save-policy" class="button primary" type="submit">保存策略</button></div>
       </form>
@@ -521,13 +526,13 @@
       }).join('');
     }
     function renderStatistics() {
-      const stats = state.status?.statistics || {started_at:0,active:{total:0,healthy:0,soft:0,hard:0,errors:0,output_tokens:0},passive:{total:0,healthy:0,soft:0,hard:0,errors:0,output_tokens:0},actions:{quarantined:0,restored:0,suppressed:0}};
+      const stats = state.status?.statistics || {started_at:0,active:{total:0,healthy:0,soft:0,hard:0,errors:0,ignored:0,output_tokens:0},passive:{total:0,healthy:0,soft:0,hard:0,errors:0,ignored:0,output_tokens:0},actions:{quarantined:0,restored:0,suppressed:0}};
       const anomalies = stats.active.soft + stats.active.hard + stats.passive.soft + stats.passive.hard;
       const items = [
         ['自动检测', stats.active.total + stats.passive.total, '主动 + 被动'],
-        ['主动探测', stats.active.total, '健康 ' + number(stats.active.healthy) + ' · 错误 ' + number(stats.active.errors)],
-        ['被动审计', stats.passive.total, '健康 ' + number(stats.passive.healthy)],
-        ['探测 Token', stats.active.output_tokens, '包含推理 Token'],
+        ['主动探测', stats.active.total, '健康 ' + number(stats.active.healthy) + ' · 错误 ' + number(stats.active.errors) + ' · 忽略 ' + number(stats.active.ignored)],
+        ['被动审计', stats.passive.total, '健康 ' + number(stats.passive.healthy) + ' · 忽略 ' + number(stats.passive.ignored)],
+        ['探测 Token', stats.active.output_tokens, '按 CPA 输出总量统计'],
         ['异常命中', anomalies, '软 ' + number(stats.active.soft + stats.passive.soft) + ' · 硬 ' + number(stats.active.hard + stats.passive.hard)],
         ['隔离操作', stats.actions.quarantined, '恢复 ' + number(stats.actions.restored) + ' · 抑制 ' + number(stats.actions.suppressed)]
       ];
@@ -537,14 +542,14 @@
     function renderEvents() {
       const events = state.status?.recentEvents || [];
       if (!events.length) { $('events-list').innerHTML = '<div class="empty">暂无守护事件</div>'; return; }
-      const names = {node_quarantined:'节点已隔离',node_restored:'节点已恢复',quality_probe_completed:'质量检测完成',node_rotated:'出口 IP 已轮换',quarantine_suppressed:'隔离已抑制',accounts_migrated:'账号已迁移'};
+      const names = {node_quarantined:'节点已隔离',node_restored:'节点已恢复',quality_probe_completed:'质量检测完成',node_rotated:'出口 IP 已轮换',node_rotation_failed:'换 IP 失败',quarantine_suppressed:'隔离已抑制',accounts_migrated:'账号已迁移',accounts_migration_failed:'账号迁移失败'};
       $('events-list').innerHTML = events.slice().reverse().map((event) => '<div class="event"><div><strong>' + esc(names[event.event] || event.event || '守护事件') + ' · ' + esc(event.node_name || ('节点 ' + event.node_id)) + '</strong><small>' + esc(event.reason || event.classification || '-') + (event.output_tps ? ' · ' + Number(event.output_tps).toFixed(1) + ' Token/s' : '') + '</small></div><time>' + relative(event.ts) + '</time></div>').join('');
     }
     function renderPolicy() {
       const cfg = state.status?.config;
       $('edit-policy').disabled = !cfg;
       if (!cfg) { $('policy-view').innerHTML = '<div class="empty">策略状态不可用</div>'; return; }
-      const values = [['模式',modeName(cfg.mode)],['主动间隔',cfg.active_interval_seconds + ' 秒'],['被动轮询',cfg.passive_poll_seconds + ' 秒'],['软 / 硬阈值',cfg.soft_tps + ' / ' + cfg.hard_tps],['连续异常',cfg.consecutive_soft + ' / ' + cfg.consecutive_errors],['隔离复测',cfg.quarantine_seconds + ' 秒'],['最低健康节点',cfg.min_healthy_nodes],['模型',cfg.model]];
+      const values = [['模式',modeName(cfg.mode)],['主动间隔',cfg.active_interval_seconds + ' 秒'],['被动轮询',cfg.passive_poll_seconds + ' 秒'],['软 / 硬阈值',cfg.soft_tps + ' / ' + cfg.hard_tps],['连续异常',cfg.consecutive_soft + ' / ' + cfg.consecutive_errors],['最短生成窗口',(cfg.min_generation_ms || 1000) + ' ms'],['最小判定 Token',cfg.min_output_tokens || 32],['隔离复测',cfg.quarantine_seconds + ' 秒'],['最低健康节点',cfg.min_healthy_nodes],['探测输出',(cfg.max_output_tokens || 384) + ' Token'],['模型',cfg.model],['迁移失败停用',cfg.disable_auth_on_hard ? '是' : '否']];
       $('policy-view').innerHTML = values.map((value) => '<div><dt>' + value[0] + '</dt><dd>' + esc(value[1]) + '</dd></div>').join('');
     }
     function openModal(id) { $(id).hidden = false; document.body.style.overflow = 'hidden'; $(id).querySelector('input,select,textarea,button')?.focus(); }
@@ -572,7 +577,7 @@
       if (!cfg) return;
       $('policy-mode').value = cfg.mode; $('policy-active').value = cfg.active_interval_seconds; $('policy-passive').value = cfg.passive_poll_seconds;
       $('policy-quarantine').value = cfg.quarantine_seconds; $('policy-soft').value = cfg.soft_tps; $('policy-hard').value = cfg.hard_tps;
-      $('policy-soft-count').value = cfg.consecutive_soft; $('policy-error-count').value = cfg.consecutive_errors; $('policy-min-healthy').value = cfg.min_healthy_nodes;
+      $('policy-soft-count').value = cfg.consecutive_soft; $('policy-error-count').value = cfg.consecutive_errors; $('policy-min-generation').value = cfg.min_generation_ms || 1000; $('policy-min-output').value = cfg.min_output_tokens || 32; $('policy-max-output').value = cfg.max_output_tokens || 384; $('policy-model').value = cfg.model || 'grok-4.5'; $('policy-disable-auth').checked = cfg.disable_auth_on_hard !== false; $('policy-min-healthy').value = cfg.min_healthy_nodes;
       openModal('policy-modal');
     }
     function parseBulkNodes(raw) {
@@ -748,7 +753,7 @@
     $('policy-form').addEventListener('submit', async (event) => {
       event.preventDefault();
       const button = $('save-policy');
-      const body = {mode:$('policy-mode').value,activeIntervalSeconds:Number($('policy-active').value),passivePollSeconds:Number($('policy-passive').value),softTPS:Number($('policy-soft').value),hardTPS:Number($('policy-hard').value),consecutiveSoft:Number($('policy-soft-count').value),consecutiveErrors:Number($('policy-error-count').value),quarantineSeconds:Number($('policy-quarantine').value),minHealthyNodes:Number($('policy-min-healthy').value)};
+      const body = {mode:$('policy-mode').value,activeIntervalSeconds:Number($('policy-active').value),passivePollSeconds:Number($('policy-passive').value),softTPS:Number($('policy-soft').value),hardTPS:Number($('policy-hard').value),consecutiveSoft:Number($('policy-soft-count').value),consecutiveErrors:Number($('policy-error-count').value),minGenerationMs:Number($('policy-min-generation').value),minOutputTokens:Number($('policy-min-output').value),maxOutputTokens:Number($('policy-max-output').value),model:$('policy-model').value.trim(),disableAuthOnHard:$('policy-disable-auth').checked,quarantineSeconds:Number($('policy-quarantine').value),minHealthyNodes:Number($('policy-min-healthy').value)};
       if (body.softTPS >= body.hardTPS) { toast('软阈值必须低于硬阈值', 'error'); return; }
       busy(button, true);
       try { await api('/quality-guard/config', {method:'PUT', body}); toast('守护策略已保存'); closeModal('policy-modal'); await load(true); }

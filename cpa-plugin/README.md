@@ -8,10 +8,10 @@
 | | |
 |---|---|
 | 插件名 | `grok2api-egress` |
-| 当前版本 | **1.0.4** |
+| 当前版本 | **1.0.5** |
 | 语言 | Go (`-buildmode=c-shared` → `.so`) |
 | CPA SDK | `CLIProxyAPI/v7` (`pluginabi` / `pluginapi`) |
-| 能力 | Management UI + Usage Plugin |
+| 能力 | Management UI + Usage Plugin + Scheduler + Request Interceptor |
 | License | MIT（见仓库根目录 `LICENSE`） |
 
 ---
@@ -27,8 +27,10 @@
 
 - 把出口抽象成 **Node**（存 proxy URL）
 - 把 CPA `xai-*.json` 账号的 `proxy_url` **粘性绑定**到 Node
-- 用 **被动 usage 观测 + 主动 quality probe** 判定 healthy / soft / hard / error
+- 用 **被动 usage 观测 + 主动 quality probe** 判定 healthy / soft / hard / error；账号、额度、上游权限失败只记录为 ignored，不消耗出口错误次数
 - **隔离（quarantine）坏节点**，并 **migrate** 账号到健康通道
+- 调度阶段跳过隔离/冷却账号；选定账号与迁移发生竞态时返回可重试的 `503 + Retry-After: 1`
+- 可选调用受信任的内部换 IP Webhook；只有确认出口 IP 已变化并通过真实模型复测才恢复节点
 - 提供完整 **管理 UI**（节点 CRUD、批量、重平衡、质量测试、策略、事件）
 
 灵感来自 Grok2API 侧的 quality-guard / egress 思路，但实现已完全 native 化，**不需要、也不连接 Grok2API**。
@@ -106,21 +108,21 @@
 |---|---|---|
 | healthy | TPS &lt; soft | 保持 |
 | soft | ≥ `soft_tps`（500） | 连续 N 次 → 隔离 |
-| hard | ≥ `hard_tps`（1000） | 立即隔离 |
+| hard | ≥ `hard_tps`（1000）且满足最小 Token 证据 | 立即隔离 |
 | error | 探测失败 | 连续 N 次 → 隔离 |
 
 隔离时：
 
 1. 节点 `quarantined_until = now + quarantine_seconds`
 2. 记事件 `node_quarantined`
-3. **migrate** 账号到健康节点（`accounts_migrated`）
-4. 到期后 probe 通过 → `node_restored`
+3. 同步摘除受影响账号，仅迁移到近期主动检测 healthy 且出口 IP 不同的节点（`accounts_migrated`）
+4. 到期后 probe 通过 → `node_restored`；可选换 IP Webhook 必须先确认新 IP 与旧 IP 不同
 
 保护项：
 
 - `min_healthy_nodes`：低于阈值则 **suppressed**，避免全军覆没
-- `minGenMs = 200`：极短生成窗口不虚高 TPS，降低 loadtest / 短回复误隔离
-- 极小 `output_tokens`（&lt;32）不做 hard 判定
+- `min_generation_ms = 1000`：极短生成窗口不虚高 TPS，降低 loadtest / 短回复误隔离
+- `min_output_tokens = 32`：证据不足的短输出标记为 ignored，不触发 soft/hard 隔离
 
 ### 管理 UI
 
@@ -140,7 +142,7 @@ UI 经 management 代理，请求头需 `X-Grok2API-Egress-UI: 1`（页面已内
 ## 目录结构
 
 ```text
-egress-guard-native/
+cpa-plugin/
 ├── go/
 │   ├── main.go          # CGO ABI、注册、Management/Usage 入口
 │   ├── store.go         # state.json 读写、节点/策略/事件
@@ -206,11 +208,21 @@ volumes:
   - ./plugin-data/egress-guard:/CLIProxyAPI/plugin-data/egress-guard
 ```
 
-3. 插件配置（CPA 插件 YAML，仅一项）：
+3. 插件配置（CPA 插件 YAML）：
 
 ```yaml
 state_file: /CLIProxyAPI/plugin-data/egress-guard/state.json
+# 可选：仅配置到受信任的内部服务；留空即完全关闭自动换 IP
+rotation_url: http://rotation-service:19099/rotate
+# 令牌只从 CPA 容器环境读取，不写入 YAML 或 state.json
+rotation_token_env: EGRESS_ROTATION_TOKEN
+rotation_timeout_seconds: 45
+# 只允许这些 Node ID 触发自动轮换，留空即禁止
+rotatable_node_ids: ["1", "2"]
 ```
+
+`rotation_url` 需要接受 `POST {"nodeId":"...","oldExitIp":"..."}`，返回
+`{"newExitIp":"..."}`。插件会拒绝空 IP、未变化 IP 和非 2xx 响应，随后仍会使用真实模型探测确认质量；Webhook 成功本身不会解除隔离。
 
 4. 重启 CPA，管理台应出现菜单 **「出口守护」**。
 
@@ -310,7 +322,7 @@ CPA_LOADTEST_LOG_DIR=/var/log/cpa-loadtest \
 - 短 `max_tokens` 适合打通链路；测真实降智请加大生成量并相应调高 `hard_tps` 判定窗口
 - `NO_PROXY` / 直连 CPA，避免本机 HTTP_PROXY 把管理/业务流量拐走
 
-### 一次实测快照（v1.0.3）
+### 历史实测快照（v1.0.3）
 
 | 项 | 结果 |
 |---|---|
@@ -326,18 +338,17 @@ CPA_LOADTEST_LOG_DIR=/var/log/cpa-loadtest \
 ## 设计要点（给贡献者）
 
 1. **Auth → Node 映射**
-   以 `proxy_url` 字符串相等为键；Usage 事件里的 auth 标识会经 cache（index / name / email / path）反查。映射失败时 hard 观测可 fallback 到最繁忙启用节点，避免“有 hard 统计却永不隔离”。
+   以 `proxy_url` 字符串相等为键；Usage 事件里的 auth 标识会经 cache（index / id / name / email / path）反查。映射失败的异常只记录诊断事件，不猜测并隔离某个“最繁忙”节点，避免误杀。
 
 2. **Quality probe**
    强制 Grok/xAI 客户端头；节点上多账号轮试，降低单账号 401 误判。
 
 3. **隔离与恢复**
-   quarantine 写状态 → migrate → 后台 worker 到期探测 → restore。
-   已知边界：并发隔离/恢复时曾出现 **UI 显示 healthy 但 `quarantined=true` 粘住**；运维侧可清 state 后 rebalance。欢迎 PR 做状态机收敛（以 `quarantined_until` 为唯一真源，cls 派生）。
+   quarantine 写状态 → 同步摘除账号 → 仅迁移到近期主动检测 healthy 且出口 IP 不同的节点 → 后台 worker 到期探测 → restore。迁移写入后会从 CPA Host API 再读一次，校验 `proxy_url` 与 disabled 状态。
 
 4. **误报控制**
-   - 最短生成窗口 `minGenMs`
-   - 小输出不做 hard
+   - 最短生成窗口 `min_generation_ms`
+   - 小输出标记 ignored，不重置或增加异常 strike
    - `min_healthy_nodes` 抑制
 
 5. **安全**
@@ -369,7 +380,7 @@ CPA_LOADTEST_LOG_DIR=/var/log/cpa-loadtest \
 
 ## 路线图 / 欢迎 PR
 
-- [ ] 修复 sticky-q（healthy 与 quarantined 标志长期不一致）
+- [x] 隔离/恢复状态机、迁移后校验与请求竞态保护
 - [ ] 事件/统计按时间窗滑动，避免历史 5xx 永久污染告警
 - [ ] 节点维度的成功率 SLO 与自动扩缩绑定
 - [x] CI：`go test` + Linux amd64/arm64 `.so` release

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -21,6 +22,8 @@ type policyConfig struct {
 	ConsecutiveSoft      int     `json:"consecutive_soft"`
 	ConsecutiveErrors    int     `json:"consecutive_errors"`
 	MinHealthyNodes      int     `json:"min_healthy_nodes"`
+	MinGenerationMs      int64   `json:"min_generation_ms"`
+	MinOutputTokens      int64   `json:"min_output_tokens"`
 	Model                string  `json:"model"`
 	DisableAuthOnHard    bool    `json:"disable_auth_on_hard"`
 	MaxOutputTokensProbe int     `json:"max_output_tokens"`
@@ -80,6 +83,7 @@ type probeStats struct {
 	Soft         int64 `json:"soft"`
 	Hard         int64 `json:"hard"`
 	Errors       int64 `json:"errors"`
+	Ignored      int64 `json:"ignored"`
 	OutputTokens int64 `json:"output_tokens"`
 }
 
@@ -123,6 +127,8 @@ func defaultPolicy() policyConfig {
 		ConsecutiveSoft:      2,
 		ConsecutiveErrors:    2,
 		MinHealthyNodes:      1,
+		MinGenerationMs:      1000,
+		MinOutputTokens:      32,
 		Model:                "grok-4.5",
 		DisableAuthOnHard:    true,
 		MaxOutputTokensProbe: 384,
@@ -165,6 +171,27 @@ func (s *stateStore) load() error {
 	}
 	if data.Policy.HardTPS <= 0 {
 		data.Policy = defaultPolicy()
+	}
+	if data.Policy.MinGenerationMs <= 0 {
+		data.Policy.MinGenerationMs = 1000
+	}
+	if data.Policy.MinOutputTokens <= 0 {
+		data.Policy.MinOutputTokens = 32
+	}
+	if data.Policy.MaxOutputTokensProbe <= 0 {
+		data.Policy.MaxOutputTokensProbe = 384
+	}
+	if data.Policy.Mode == "" {
+		data.Policy.Mode = "hybrid"
+	}
+	if data.Policy.ActiveIntervalSec <= 0 {
+		data.Policy.ActiveIntervalSec = 1800
+	}
+	if data.Policy.PassivePollSec <= 0 {
+		data.Policy.PassivePollSec = 5
+	}
+	if data.Policy.QuarantineSec <= 0 {
+		data.Policy.QuarantineSec = 120
 	}
 	// hydrate private proxy field
 	for _, n := range data.Nodes {
@@ -226,6 +253,9 @@ func (s *stateStore) updatePolicy(p policyConfig) error {
 	if p.Mode == "" {
 		p.Mode = "hybrid"
 	}
+	if p.Mode != "active" && p.Mode != "passive" && p.Mode != "hybrid" {
+		return fmt.Errorf("模式必须是 active、passive 或 hybrid")
+	}
 	if p.Model == "" {
 		p.Model = "grok-4.5"
 	}
@@ -238,8 +268,26 @@ func (s *stateStore) updatePolicy(p policyConfig) error {
 	if p.QuarantineSec <= 0 {
 		p.QuarantineSec = 120
 	}
+	if p.ActiveIntervalSec < 60 || p.ActiveIntervalSec > 86400 {
+		return fmt.Errorf("主动检测间隔需在 60 到 86400 秒之间")
+	}
+	if p.PassivePollSec < 1 || p.PassivePollSec > 3600 {
+		return fmt.Errorf("被动审计间隔需在 1 到 3600 秒之间")
+	}
+	if p.QuarantineSec < 10 || p.QuarantineSec > 86400 {
+		return fmt.Errorf("隔离复测间隔需在 10 到 86400 秒之间")
+	}
 	if p.MinHealthyNodes <= 0 {
 		p.MinHealthyNodes = 1
+	}
+	if p.MinGenerationMs < 200 || p.MinGenerationMs > 10000 {
+		return fmt.Errorf("最短生成窗口需在 200 到 10000 毫秒之间")
+	}
+	if p.MinOutputTokens < 1 || p.MinOutputTokens > 10000 {
+		return fmt.Errorf("最小判定 Token 数需在 1 到 10000 之间")
+	}
+	if p.MaxOutputTokensProbe < 16 || p.MaxOutputTokensProbe > 4096 {
+		return fmt.Errorf("主动探测最大输出需在 16 到 4096 Token 之间")
 	}
 	s.data.Policy = p
 	return s.persistLocked()
@@ -301,6 +349,9 @@ func (s *stateStore) createNodes(inputs []nodeCreateInput) ([]*nodeRecord, error
 		if inputs[index].Name == "" || inputs[index].ProxyURL == "" {
 			return nil, fmt.Errorf("第 %d 个节点缺少名称或代理 URL", index+1)
 		}
+		if err := validateProxyURL(inputs[index].ProxyURL); err != nil {
+			return nil, fmt.Errorf("第 %d 个节点代理 URL 无效: %w", index+1, err)
+		}
 		if inputs[index].AccountCapacity < 0 || inputs[index].AccountCapacity > 100000 {
 			return nil, fmt.Errorf("第 %d 个节点容量需在 0 到 100000 之间", index+1)
 		}
@@ -349,6 +400,11 @@ func (s *stateStore) updateNode(id string, mut func(*nodeRecord) error) (*nodeRe
 	if err := mut(n); err != nil {
 		return nil, err
 	}
+	if n.ProxyURL != "" {
+		if err := validateProxyURL(n.ProxyURL); err != nil {
+			return nil, err
+		}
+	}
 	n.UpdatedAt = time.Now().UTC()
 	if err := s.persistLocked(); err != nil {
 		return nil, err
@@ -356,6 +412,19 @@ func (s *stateStore) updateNode(id string, mut func(*nodeRecord) error) (*nodeRe
 	cp := *n
 	cp.ProxyURL = n.ProxyURL
 	return &cp, nil
+}
+
+func validateProxyURL(raw string) error {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" {
+		return fmt.Errorf("代理 URL 必须包含主机和端口")
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http", "https", "socks5", "socks5h":
+		return nil
+	default:
+		return fmt.Errorf("代理协议仅支持 http、https、socks5 或 socks5h")
+	}
 }
 
 func (s *stateStore) deleteNodes(ids []string) error {
@@ -426,6 +495,8 @@ func (s *stateStore) bumpStat(source, class string, tokens int64) {
 		ps.Hard++
 	case "error":
 		ps.Errors++
+	case "ignored", "account_error", "upstream_error", "no_account":
+		ps.Ignored++
 	}
 	_ = s.persistLocked()
 }
