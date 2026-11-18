@@ -170,6 +170,9 @@ pnpm build
 ## 相关项目
 
 - [Grok Register + Live Panel](https://github.com/lij768423-svg/grok-register-panel)：基于 Camoufox 的 Grok 注册流程与 Web 管理面板，支持多邮箱后端、外部代理池、出口预检、ASN 黑名单、运行统计和账号补录。它是独立项目，不包含在本补丁中。
+- [meshatlas](https://github.com/lij768423-svg/meshatlas) — Tailscale tailnet 实时地图：节点位置、直连 / DERP 路径、延迟矩阵
+- [ai-quota](https://github.com/lij768423-svg/ai-quota) — 一页看 Claude、Codex、Grok、Antigravity 的订阅额度
+- 作者的其他项目见 [GitHub 主页](https://github.com/lij768423-svg) 和 [ljj.world](https://ljj.world)，想看新项目可以在主页点 Follow
 
 ## 友情链接
 
